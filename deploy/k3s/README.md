@@ -65,6 +65,7 @@ The chart applies the same `nodeSelector` and `tolerations` to the installer and
 | `gcWorkloadAnnotations` | `false`. Enable to let Pod template annotations override the two workload GC defaults individually. |
 | `gcIntervalSeconds` | `60`. A positive integer giving the wait in seconds before each GC sweep. |
 | `deploymentLocalReuse` | `false`. Enable to allow opted-in Deployment Pods to reuse compatible released layers on the same node. |
+| `deploymentLocalReuseNamespaces` | `[]`. Explicit list of trusted workload namespaces. Required when Deployment reuse is enabled. |
 | `persistAnnotation` | `permabox.io/persist`. Update the workload Pod annotations if you change this key. |
 
 Use `permabox.io/storage-root` to set a storage alias for the container selected for persistence. Use `permabox.io/underlying-runtime` to set a runtime alias for the workload containers. The sandbox uses the default runtime from the time it was created. See [storage and runtime aliases](../README.md#1-install-on-the-target-node). When upgrading, use a new release image tag or push your custom build with a new tag. While container records still exist, the installer permits changes to the workload GC switches alone. Stop PermaBox workloads before changing other runtime settings.
@@ -73,7 +74,7 @@ The installer runs `permabox validate-config` on the staged configuration before
 
 ## Deployment local reuse
 
-Set `--set deploymentLocalReuse=true` when installing or upgrading the Helm release. Then add both annotations to the **Deployment's Pod template**, using the `permabox` RuntimeClass:
+Set `--set deploymentLocalReuse=true --set-string 'deploymentLocalReuseNamespaces[0]=trusted-apps'` when installing or upgrading the Helm release. Only list namespaces where everyone who can create or modify Pods or workloads is trusted with the other workloads' data. Kubernetes owner references describe ownership, but do not authorize access between tenants in a shared namespace. Then add both annotations to the **Deployment's Pod template**, using the `permabox` RuntimeClass:
 
 ```yaml
 spec:

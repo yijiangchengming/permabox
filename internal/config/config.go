@@ -20,23 +20,25 @@ const (
 )
 
 type Config struct {
-	StorageRoot           string            `yaml:"storage_root"`
-	Runtime               string            `yaml:"underlying_runtime"`
-	LogFile               string            `yaml:"log_file"`
-	Annotation            string            `yaml:"persist_annotation"`
-	StorageRoots          map[string]string `yaml:"storage_roots"`
-	UnderlyingRuntimes    map[string]string `yaml:"underlying_runtimes"`
-	GCIdleTTL             time.Duration     `yaml:"gc_idle_ttl"`
-	GCOnWorkloadDelete    bool              `yaml:"gc_on_workload_delete"`
-	GCOnScaleToZero       bool              `yaml:"gc_on_scale_to_zero"`
-	GCWorkloadAnnotations bool              `yaml:"gc_workload_annotations"`
-	WorkloadSocket        string            `yaml:"workload_socket"`
-	DeploymentLocalReuse  bool              `yaml:"deployment_local_reuse"`
-	CRIEndpoint           string            `yaml:"cri_endpoint"`
-	K3sBin                string            `yaml:"k3s_bin"`
+	StorageRoot                    string            `yaml:"storage_root"`
+	Runtime                        string            `yaml:"underlying_runtime"`
+	LogFile                        string            `yaml:"log_file"`
+	Annotation                     string            `yaml:"persist_annotation"`
+	StorageRoots                   map[string]string `yaml:"storage_roots"`
+	UnderlyingRuntimes             map[string]string `yaml:"underlying_runtimes"`
+	GCIdleTTL                      time.Duration     `yaml:"gc_idle_ttl"`
+	GCOnWorkloadDelete             bool              `yaml:"gc_on_workload_delete"`
+	GCOnScaleToZero                bool              `yaml:"gc_on_scale_to_zero"`
+	GCWorkloadAnnotations          bool              `yaml:"gc_workload_annotations"`
+	WorkloadSocket                 string            `yaml:"workload_socket"`
+	DeploymentLocalReuse           bool              `yaml:"deployment_local_reuse"`
+	DeploymentLocalReuseNamespaces []string          `yaml:"deployment_local_reuse_namespaces"`
+	CRIEndpoint                    string            `yaml:"cri_endpoint"`
+	K3sBin                         string            `yaml:"k3s_bin"`
 }
 
 var aliasPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,62}$`)
+var namespacePattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
 func Load() (Config, error) {
 	cfg := Config{StorageRoot: "/var/lib/permabox/storage", Runtime: "/usr/bin/runc", LogFile: DefaultLog, Annotation: "permabox.io/persist"}
@@ -75,10 +77,18 @@ func Load() (Config, error) {
 		return cfg, errors.New("workload_socket must be a clean absolute path")
 	}
 	if cfg.DeploymentLocalReuse {
+		if len(cfg.DeploymentLocalReuseNamespaces) == 0 {
+			return cfg, errors.New("deployment_local_reuse requires trusted deployment_local_reuse_namespaces")
+		}
 		path, ok := strings.CutPrefix(cfg.CRIEndpoint, "unix://")
 		if !ok || !validPath(path) || filepath.Clean(path) != path ||
 			!validPath(cfg.K3sBin) || filepath.Clean(cfg.K3sBin) != cfg.K3sBin {
 			return cfg, errors.New("deployment_local_reuse requires a local Unix cri_endpoint and an absolute k3s_bin")
+		}
+	}
+	for _, namespace := range cfg.DeploymentLocalReuseNamespaces {
+		if !namespacePattern.MatchString(namespace) {
+			return cfg, fmt.Errorf("invalid trusted Deployment reuse namespace %q", namespace)
 		}
 	}
 	for _, choices := range []map[string]string{cfg.StorageRoots, cfg.UnderlyingRuntimes} {

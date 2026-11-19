@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/yijiangchengming/permabox/internal/workload"
 )
@@ -57,7 +58,53 @@ func TestDeploymentSlotCannotBeSharedOrStolenFromLivePod(t *testing.T) {
 	if err != nil || replacement.Slot != second {
 		t.Fatalf("same Pod should win over eligible peers: %+v, %v", replacement, err)
 	}
+	if err := m.ActivateOwnership("replacement"); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := os.Stat(filepath.Join(second, releasedMarker)); !os.IsNotExist(err) {
 		t.Fatalf("claimed release marker remains: %v", err)
+	}
+}
+
+func TestFailedDeploymentMountPreservesPreviousRelease(t *testing.T) {
+	m, sys, root, slot := fixture(t)
+	storage := filepath.Dir(filepath.Dir(slot))
+	owner := workload.Owner{Namespace: "namespace", Name: "app", Kind: "Deployment", UID: "owner-1"}
+	claim := DeploymentClaim{Pod: "app-1", PodUID: "pod-1", Image: "image-a", Runtime: "/usr/bin/runc"}
+	prepare := func(id string) error {
+		_, err := m.PrepareDeployment(context.Background(), id, root, storage, "demo", owner, claim, 0,
+			func(context.Context, string, string) (bool, error) { return true, nil })
+		return err
+	}
+	if err := prepare("original"); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.ActivateOwnership("original"); err != nil {
+		t.Fatal(err)
+	}
+	slot, err := m.CleanupSlot("original")
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(slot, releasedMarker)
+	var before, after time.Time
+	if !readMarker(marker, &before) {
+		t.Fatal("original release is missing")
+	}
+	claim.Pod, claim.PodUID = "app-2", "pod-2"
+	sys.fail = true
+	if err := prepare("failed"); err == nil {
+		t.Fatal("expected overlay mount failure")
+	}
+	if !readMarker(marker, &after) || !before.Equal(after) {
+		t.Fatal("failed claim lost the previous release record")
+	}
+	sys.fail = false
+	if err := prepare("retry"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := readRecord(m.journal("retry"))
+	if err != nil || got.Slot != slot {
+		t.Fatalf("previous data is unavailable to a later claim: %+v, %v", got, err)
 	}
 }

@@ -193,6 +193,7 @@ test ! -e "$tmp/slept-after-failure"
 unset fail_restart
 (
   export DEPLOYMENT_LOCAL_REUSE=true K3S_CRI_ENDPOINT=unix:///custom/cri.sock K3S_BIN=/custom/bin/k3s
+  export DEPLOYMENT_LOCAL_REUSE_NAMESPACES='["trusted-apps"]'
   export GC_ON_WORKLOAD_DELETE=false GC_ON_SCALE_TO_ZERO=false GC_WORKLOAD_ANNOTATIONS=false
   # Wait for the mocked bridge invocation, then stop before the next sweep.
   sleep() {
@@ -205,6 +206,7 @@ unset fail_restart
   main
   test "$(<"$BRIDGE_LOG")" = "$HOST_ROOT/opt/permabox-k3s/workload.sock"
   jq -e '.deployment_local_reuse == true and .cri_endpoint == "unix:///custom/cri.sock" and
+         .deployment_local_reuse_namespaces == ["trusted-apps"] and
          .k3s_bin == "/custom/bin/k3s" and
          (has("gc_on_workload_delete") or has("gc_on_scale_to_zero") or has("gc_workload_annotations") | not)' \
     "$HOST_ROOT/opt/permabox-k3s/config.yaml" >/dev/null

@@ -63,6 +63,7 @@ Chart 将同一套 `nodeSelector` 和 `tolerations` 应用于安装器和 Runtim
 | `gcWorkloadAnnotations` | `false`；设为 `true` 后，允许 Pod 模板注解单独覆盖上面两项默认值 |
 | `gcIntervalSeconds` | `60`；每次 GC 前等待的秒数（正整数） |
 | `deploymentLocalReuse` | `false`；设为 `true` 后，允许显式启用该功能的 Deployment Pod 复用同一节点上符合条件且已释放的写层 |
+| `deploymentLocalReuseNamespaces` | `[]`；启动 Deployment 复用时必须指定受信任的工作负载命名空间 |
 | `persistAnnotation` | `permabox.io/persist`；更改后须同步修改业务 Pod |
 
 在 Pod 上用 `permabox.io/storage-root` 为选中的持久化容器指定存储别名，用 `permabox.io/underlying-runtime` 为业务容器指定运行时别名；sandbox 使用创建时的默认运行时。参见[别名配置](../README-cn.md#1-安装到目标节点)。升级时请使用新的发布镜像标签，或用新标签推送自定义构建。仍存在容器记录时，安装器允许单独修改工作负载回收开关，修改其他运行时配置前请先停止 PermaBox 工作负载。
@@ -71,7 +72,7 @@ Chart 将同一套 `nodeSelector` 和 `tolerations` 应用于安装器和 Runtim
 
 ## Deployment 节点本地复用
 
-安装或升级 Helm release 时传入 `--set deploymentLocalReuse=true`，然后在 **Deployment 的 Pod 模板**中添加以下两个注解，并使用 `permabox` RuntimeClass：
+安装或升级 Helm release 时传入 `--set deploymentLocalReuse=true --set-string 'deploymentLocalReuseNamespaces[0]=trusted-apps'`。只允许列入所有 Pod 和工作负载创建者、修改者均可互相信任并访问彼此数据的命名空间。Kubernetes 的所有者引用用于描述归属，不能作为共享命名空间里的租户授权。然后在 **Deployment 的 Pod 模板**中添加以下两个注解，并使用 `permabox` RuntimeClass：
 
 ```yaml
 spec:

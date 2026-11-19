@@ -6,6 +6,7 @@ set -euo pipefail
 export LC_ALL=C
 
 storage=${1:?pass storage root}
+namespace=${2:?pass the trusted test namespace}
 marker=permabox-deployment-smoke-data
 restart_marker=/permabox-smoke-restart
 
@@ -154,14 +155,7 @@ assert_host_markers() {
     fail "Expected $1 marker files in $storage/$namespace; found: $paths"
 }
 
-namespace=$(k create -f - -o jsonpath='{.metadata.name}' <<'EOF'
-apiVersion: v1
-kind: Namespace
-metadata:
-  generateName: permabox-deployment-smoke-
-EOF
-)
-[[ -n $namespace ]] || fail 'No namespace returned by K3s'
+k create namespace "$namespace"
 echo "Checking Deployment local reuse in $namespace"
 create_deployment reuse false
 wait_for ready_pods reuse 3
@@ -228,6 +222,9 @@ if [[ $replacement_value != - ]] && grep -Fxq -- "$replacement_value" < <(cut -d
 fi
 
 assert_host_markers 3
+replacement_name=$(jq -er --arg uid "$replacement_uid" '.items[] | select(.metadata.uid == $uid) | .metadata.name' <<< "$pods")
+# shellcheck disable=SC2016
+pod_exec "$replacement_name" 'printf "%s\n" "$1" > /permabox-smoke-replacement; test "$(cat /permabox-smoke-replacement)" = "$1"' sh "$replacement_uid"
 echo 'Checking that a different image starts with fresh layers during a rolling update'
 old_image_ids=$(jq -r '.items[].status.containerStatuses[0].imageID' <<< "$pods" | sort -u)
 app set image deployment/reuse demo=docker.io/library/alpine:3.21

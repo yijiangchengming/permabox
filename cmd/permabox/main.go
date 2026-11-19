@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"syscall"
 	"time"
 
@@ -200,8 +201,8 @@ func run(cfg config.Config, manager mount.Manager, args []string) int {
 func preparePersistence(cfg config.Config, manager mount.Manager, id string, bundle *oci.Bundle, storage, runtime string, report func(string, ...any)) (bool, error) {
 	client := workloadClient(cfg)
 	if bundle.ReusePolicy == "deployment-local" {
-		if !cfg.DeploymentLocalReuse {
-			return false, errors.New("deployment-local reuse is disabled on this node")
+		if !cfg.DeploymentLocalReuse || !slices.Contains(cfg.DeploymentLocalReuseNamespaces, bundle.Namespace) {
+			return false, fmt.Errorf("deployment-local reuse is disabled for namespace %q", bundle.Namespace)
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()

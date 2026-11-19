@@ -139,7 +139,7 @@ func (m Manager) prepareOwned(id, root, slot, container string, owner workload.O
 		if err == nil && own == 0 {
 			err = errors.New("previous create was interrupted; delete the container before retrying")
 		}
-		if err == nil {
+		if err == nil && claim == nil {
 			err = removeDurable(filepath.Join(slot, releasedMarker))
 		}
 		return false, err
@@ -168,8 +168,12 @@ func (m Manager) prepareOwned(id, root, slot, container string, owner workload.O
 	if err := prepareSlot(slot, container, info); err != nil {
 		return false, err
 	}
-	if err := removeDurable(filepath.Join(slot, releasedMarker)); err != nil {
-		return false, err
+	// The journal excludes concurrent claims and GC. Keep a Deployment's
+	// release record intact until start commits the new ownership.
+	if claim == nil {
+		if err := removeDurable(filepath.Join(slot, releasedMarker)); err != nil {
+			return false, err
+		}
 	}
 	if err := writeRecord(m.journal(id), want); err != nil {
 		return false, err
@@ -213,9 +217,16 @@ func (m Manager) ActivateOwnership(id string) error {
 		}
 	}
 	if state.PendingOwner.Valid() {
-		return writeRecord(path, state.PendingOwner)
+		if err := writeRecord(path, state.PendingOwner); err != nil {
+			return err
+		}
+	} else if err := removeDurable(path); err != nil {
+		return err
 	}
-	return removeDurable(path)
+	if state.Deployment != nil {
+		return removeDurable(filepath.Join(state.Slot, releasedMarker))
+	}
+	return nil
 }
 
 func (m Manager) install(id string, state *record) error {

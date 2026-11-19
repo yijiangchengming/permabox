@@ -29,6 +29,7 @@ gcWorkloadAnnotations: false
 gcIntervalSeconds: 60
 # Opt in to reusing writable layers across local Deployment Pods.
 deploymentLocalReuse: false
+deploymentLocalReuseNamespaces: []
 persistAnnotation: permabox.io/persist
 
 # Choose at least one target label. Start with kubernetes.io/hostname for a

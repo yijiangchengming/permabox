@@ -109,7 +109,8 @@ write_runtime() {
     --argjson storage_roots "${STORAGE_ROOTS:-$empty_map}" --argjson runtimes "${UNDERLYING_RUNTIMES:-$empty_map}" \
     --argjson on_delete "${GC_ON_WORKLOAD_DELETE:-false}" --argjson on_zero "${GC_ON_SCALE_TO_ZERO:-false}" \
     --argjson workload_annotations "${GC_WORKLOAD_ANNOTATIONS:-false}" \
-    --argjson reuse "${DEPLOYMENT_LOCAL_REUSE:-false}" --arg endpoint "$endpoint" --arg k3s "$k3s_bin" \
+    --argjson reuse "${DEPLOYMENT_LOCAL_REUSE:-false}" --argjson reuse_namespaces "${DEPLOYMENT_LOCAL_REUSE_NAMESPACES:-[]}" \
+    --arg endpoint "$endpoint" --arg k3s "$k3s_bin" \
     --arg ttl "${GC_IDLE_TTL:-0s}" --arg wrapper "$wrapper" '
       if $runtime == $wrapper or any($runtimes[]?; . == $wrapper) then
         error("an underlying runtime cannot point to the PermaBox installer wrapper")
@@ -120,7 +121,8 @@ write_runtime() {
         + (if $on_delete == false then {} else {gc_on_workload_delete: $on_delete} end)
         + (if $on_zero == false then {} else {gc_on_scale_to_zero: $on_zero} end)
         + (if $workload_annotations == false then {} else {gc_workload_annotations: $workload_annotations} end)
-        + (if $reuse == false then {} else {deployment_local_reuse: $reuse, cri_endpoint: $endpoint, k3s_bin: $k3s} end)
+        + (if $reuse == false then {} else {deployment_local_reuse: $reuse, deployment_local_reuse_namespaces: $reuse_namespaces,
+                                            cri_endpoint: $endpoint, k3s_bin: $k3s} end)
       end
     ' >"$tmpdir/config.yaml" || return 1
   PERMABOX_CONFIG="$tmpdir/config.yaml" "$payload" validate-config || {

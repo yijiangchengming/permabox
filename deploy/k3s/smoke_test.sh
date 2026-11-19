@@ -5,6 +5,7 @@ set -euo pipefail
 chart=deploy/helm/permabox
 installer_ns=permabox-system
 demo_ns=permabox-demo
+deployment_ns=permabox-deployment-smoke
 storage=/var/lib/permabox/ci-storage
 pod=permabox-demo-0
 slot=$storage/$demo_ns/$pod
@@ -52,6 +53,7 @@ helm upgrade --install permabox "$chart" -n "$installer_ns" --create-namespace \
   --set-string image.pullPolicy=Never --set-string storageRoot="$storage" \
   --set gcOnScaleToZero=true --set gcOnWorkloadDelete=true --set gcIntervalSeconds=5 \
   --set deploymentLocalReuse=true --set gcWorkloadAnnotations=true \
+  --set-string "deploymentLocalReuseNamespaces[0]=$deployment_ns" \
   --timeout 2m
 wait_for installer_ready
 k get runtimeclass permabox -o json | jq -e '.handler == "permabox"'
@@ -104,7 +106,7 @@ demo delete statefulset permabox-demo --cascade=foreground --wait=false
 wait_for workload_stopped
 wait_for sudo test ! -e "$slot"
 
-bash deploy/k3s/deployment_smoke_test.sh "$storage"
+bash deploy/k3s/deployment_smoke_test.sh "$storage" "$deployment_ns"
 
 echo 'Removing the runtime and uninstalling the chart'
 helm upgrade permabox "$chart" -n "$installer_ns" --reuse-values --set mode=remove --timeout 2m

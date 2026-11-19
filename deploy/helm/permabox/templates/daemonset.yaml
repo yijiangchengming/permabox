@@ -70,6 +70,11 @@ spec:
               value: {{ default 60 .Values.gcIntervalSeconds | quote }}
             - name: DEPLOYMENT_LOCAL_REUSE
               value: {{ default false .Values.deploymentLocalReuse | quote }}
+            - name: DEPLOYMENT_LOCAL_REUSE_NAMESPACES
+              {{- if and .Values.deploymentLocalReuse (not .Values.deploymentLocalReuseNamespaces) }}
+              {{- fail "deploymentLocalReuse requires deploymentLocalReuseNamespaces to list trusted namespaces" }}
+              {{- end }}
+              value: {{ .Values.deploymentLocalReuseNamespaces | default (list) | toJson | quote }}
             - name: PERSIST_ANNOTATION
               value: {{ .Values.persistAnnotation | quote }}
           readinessProbe:

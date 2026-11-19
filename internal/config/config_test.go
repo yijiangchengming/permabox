@@ -7,6 +7,27 @@ import (
 	"time"
 )
 
+func TestDeploymentReuseRequiresTrustedNamespaces(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	t.Setenv("PERMABOX_CONFIG", path)
+	for _, tc := range []struct {
+		suffix string
+		valid  bool
+	}{
+		{"", false},
+		{"deployment_local_reuse_namespaces: ['*']\n", false},
+		{"deployment_local_reuse_namespaces: [trusted-apps]\n", true},
+	} {
+		body := "deployment_local_reuse: true\ncri_endpoint: unix:///run/containerd.sock\nk3s_bin: /usr/local/bin/k3s\n" + tc.suffix
+		if err := os.WriteFile(path, []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(); (err == nil) != tc.valid {
+			t.Fatalf("suffix %q: unexpected validation result: %v", tc.suffix, err)
+		}
+	}
+}
+
 func TestLoadOverridesAndDefaults(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(path, []byte("storage_root: /srv/yaml\nlog_file: '/tmp/perma log'\n"), 0600); err != nil {
