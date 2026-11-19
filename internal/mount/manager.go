@@ -210,6 +210,10 @@ func (m Manager) install(id string, state *record) error {
 	if err := writeRecord(m.journal(id), state); err != nil {
 		return err
 	}
+	// A bind of a shared snapshot inherits its peer group unless isolated here.
+	if err := m.sys.mount("", alias, "", syscall.MS_PRIVATE, ""); err != nil {
+		return fmt.Errorf("make lower alias private: %w", err)
+	}
 	if err := m.sys.mount("", alias, "", syscall.MS_BIND|syscall.MS_REMOUNT|syscall.MS_RDONLY|syscall.MS_NOSUID|syscall.MS_NODEV|syscall.MS_NOEXEC, ""); err != nil {
 		return fmt.Errorf("remount lower alias read-only: %w", err)
 	}

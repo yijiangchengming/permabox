@@ -46,8 +46,18 @@ func TestKernelPersistence(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { _ = syscall.Unmount(root, syscall.MNT_DETACH) })
+			if err := syscall.Mount("", root, "", syscall.MS_SHARED, ""); err != nil {
+				t.Fatal(err)
+			}
 			if _, err := m.PrepareOwned(id, root, slot, "app", owner); err != nil {
 				t.Fatal(err)
+			}
+			mounts, err := m.sys.mounts()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if lower, err := lowerMountID(mounts, m.alias(id)); lower == 0 || err != nil {
+				t.Fatalf("expected one private lower mount, got %d, %v", lower, err)
 			}
 			if err := m.ActivateOwnership(id); err != nil {
 				t.Fatal(err)
