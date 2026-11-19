@@ -20,7 +20,7 @@ vet:
 	$(GO) vet ./...
 
 lint-installer:
-	shellcheck -x deploy/k3s/installer.sh deploy/k3s/installer_test.sh
+	shellcheck -x deploy/k3s/installer.sh deploy/k3s/installer_test.sh deploy/k3s/smoke_test.sh
 	bash deploy/k3s/installer_test.sh
 
 lint-chart:

@@ -12,7 +12,10 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -34,3 +37,32 @@ jobs:
           docker build -f deploy/k3s/Dockerfile -t permabox-installer:ci .
           docker run --rm --entrypoint /usr/local/lib/permabox/permabox \
             permabox-installer:ci validate-config
+      - name: Start a single-node K3s cluster
+        env:
+          INSTALL_K3S_VERSION: v1.34.5+k3s1
+        run: |
+          curl --fail --silent --show-error --location --retry 3 \
+            "https://raw.githubusercontent.com/k3s-io/k3s/${INSTALL_K3S_VERSION}/install.sh" \
+            --output "$RUNNER_TEMP/install-k3s.sh"
+          sudo env INSTALL_K3S_VERSION="$INSTALL_K3S_VERSION" sh "$RUNNER_TEMP/install-k3s.sh" \
+            server --disable=traefik --disable=servicelb --disable=local-storage --disable=metrics-server
+          kubeconfig="$RUNNER_TEMP/k3s.yaml"
+          sudo install -m 0600 -o "$(id -u)" /etc/rancher/k3s/k3s.yaml "$kubeconfig"
+          echo "KUBECONFIG=$kubeconfig" >> "$GITHUB_ENV"
+          export KUBECONFIG="$kubeconfig"
+          # shellcheck disable=SC2016
+          timeout 120s bash -c 'until [[ -n $(k3s kubectl --request-timeout=5s get nodes -o name) ]]; do sleep 2; done'
+          k3s kubectl wait --for=condition=Ready node --all --timeout=180s
+          docker save permabox-installer:ci | sudo k3s ctr -n k8s.io images import -
+      - name: Verify Helm deployment on K3s
+        run: bash deploy/k3s/smoke_test.sh
+      - name: Collect K3s diagnostics on failure
+        if: failure()
+        run: |
+          sudo journalctl -u k3s --no-pager -n 250 || true
+          if [[ -n ${KUBECONFIG:-} ]]; then
+            k3s kubectl --request-timeout=10s get pods -A -o wide || true
+            k3s kubectl --request-timeout=10s -n permabox-system logs daemonset/permabox-installer --tail=150 || true
+            k3s kubectl --request-timeout=10s -n permabox-system logs daemonset/permabox-installer --previous --tail=150 || true
+            k3s kubectl --request-timeout=10s get events -A --sort-by=.lastTimestamp || true
+          fi

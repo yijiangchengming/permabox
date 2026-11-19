@@ -17,6 +17,8 @@ docker run --rm --entrypoint /usr/local/lib/permabox/permabox \
 
 In a pull request, describe what changed, how you verified it, and any change in how nodes, writable layers, or existing Helm installations are handled. Do not include kubeconfigs, node data, tokens, or logs containing credentials.
 
+GitHub Actions imports the installer image built from the current checkout into a single-node K3s cluster. The smoke test covers Helm installation, persistence after StatefulSet Pod replacement, data reclamation after scaling to zero or deleting the StatefulSet, and runtime removal. Image releases run the same CI checks before publishing.
+
 ## Release an installer image
 
 1. Review the release commit on `main`. Update `version` in [Chart.yaml](deploy/helm/permabox/Chart.yaml) for chart changes and set `appVersion` to the installer image version the chart should default to.
