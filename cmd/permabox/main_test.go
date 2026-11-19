@@ -16,7 +16,7 @@ import (
 )
 
 func TestPassthroughProcess(t *testing.T) {
-	base := t.TempDir()
+	base := privateStateDir(t)
 	out, stderr, code := call(t, base, "23", "--root", "a b", "state", "container-id")
 	if out != "--root\na b\nstate\ncontainer-id\nforwarded\n" || stderr != "runtime stderr\n" || code != 23 {
 		t.Fatalf("stdout=%q stderr=%q exit=%d", out, stderr, code)
@@ -24,7 +24,7 @@ func TestPassthroughProcess(t *testing.T) {
 }
 
 func TestManagedDeleteRetainsStateUntilSuccess(t *testing.T) {
-	base := t.TempDir()
+	base := privateStateDir(t)
 	journal := filepath.Join(base, "id.json")
 	ns, err := os.Readlink("/proc/self/ns/mnt")
 	if err != nil {
@@ -50,7 +50,7 @@ func TestManagedDeleteRetainsStateUntilSuccess(t *testing.T) {
 }
 
 func TestRuntimeOverrideStaysPinnedUntilDelete(t *testing.T) {
-	base := t.TempDir()
+	base := privateStateDir(t)
 	bundle := filepath.Join(base, "bundle")
 	if err := os.Mkdir(bundle, 0700); err != nil {
 		t.Fatal(err)
@@ -92,7 +92,7 @@ func TestRuntimeOverrideStaysPinnedUntilDelete(t *testing.T) {
 }
 
 func TestDefaultSandboxRuntimeStaysPinnedAfterConfigChange(t *testing.T) {
-	base := t.TempDir()
+	base := privateStateDir(t)
 	bundle := filepath.Join(base, "bundle")
 	if err := os.Mkdir(bundle, 0700); err != nil {
 		t.Fatal(err)
@@ -110,6 +110,15 @@ func TestDefaultSandboxRuntimeStaysPinnedAfterConfigChange(t *testing.T) {
 	if code != 0 || out != "state\nsandbox-id\nforwarded\n" {
 		t.Fatalf("state used changed default: %q (%d)", out, code)
 	}
+}
+
+func privateStateDir(t *testing.T) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "state")
+	if err := os.Mkdir(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	return dir
 }
 
 func call(t *testing.T, base, exit string, args ...string) (string, string, int) {
