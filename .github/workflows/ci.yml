@@ -60,6 +60,7 @@ jobs:
         if: failure()
         run: |
           sudo journalctl -u k3s --no-pager -n 250 || true
+          sudo tail -n 100 /var/log/permabox.log || true
           if [[ -n ${KUBECONFIG:-} ]]; then
             k3s kubectl --request-timeout=10s get pods -A -o wide || true
             k3s kubectl --request-timeout=10s -n permabox-system logs daemonset/permabox-installer --tail=150 || true
