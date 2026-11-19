@@ -22,6 +22,8 @@ spec:
       automountServiceAccountToken: {{ $workloadGC }}
       {{- if $workloadGC }}
       serviceAccountName: {{ include "permabox.workloadGCName" . }}
+      {{- else }}
+      serviceAccountName: default
       {{- end }}
       hostPID: true
       {{- include "permabox.scheduling" . | nindent 6 }}
