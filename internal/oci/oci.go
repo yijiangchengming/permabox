@@ -125,6 +125,7 @@ func flag(args []string, i int, values, switches map[string]bool) (int, string, 
 
 type Bundle struct {
 	Root, Namespace, Pod, Container, PodUID string
+	ReusePolicy                             string
 }
 
 const (
@@ -186,7 +187,7 @@ func InspectBundle(bundle, annotation string) (BundleOptions, error) {
 	if err != nil {
 		return options, invalidPersistence{err}
 	}
-	options.Persistence = &Bundle{root, ns, pod, name, a["io.kubernetes.cri.sandbox-uid"]}
+	options.Persistence = &Bundle{root, ns, pod, name, a["io.kubernetes.cri.sandbox-uid"], a["permabox.io/reuse-policy"]}
 	options.StorageAlias = a[StorageRootAnnotation]
 	return options, nil
 }

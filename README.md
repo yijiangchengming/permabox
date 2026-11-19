@@ -4,7 +4,7 @@
 
 PermaBox preserves changes to a container's root filesystem across Kubernetes Pod recreation on the same Linux node. It wraps a runc-compatible OCI runtime and uses a node-local OverlayFS writable layer. The application container does not need to run in privileged mode.
 
-It is intended for workloads with stable Pod names, such as StatefulSets. Persistence is keyed by storage root, namespace, and Pod name, with one persistent container per Pod. PermaBox does not migrate data between nodes, manage mounted volumes, or provide a backup. Use a PersistentVolume when you need Kubernetes to manage application storage explicitly.
+By default, persistence is keyed by storage root, namespace, and Pod name, with one persistent container per Pod. This suits workloads with stable Pod names, such as StatefulSets. [Deployment local reuse](deploy/k3s/README.md#deployment-local-reuse) is a separate Helm and Pod template opt-in for compatible replacement Pods on the same node. PermaBox does not migrate data between nodes, manage mounted volumes, or provide a backup. Use a PersistentVolume when you need Kubernetes to manage application storage explicitly.
 
 ## Features
 

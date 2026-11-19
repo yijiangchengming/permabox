@@ -27,6 +27,8 @@ gcOnScaleToZero: false
 # Allow Pod template annotations to override the two defaults above.
 gcWorkloadAnnotations: false
 gcIntervalSeconds: 60
+# Opt in to reusing writable layers across local Deployment Pods.
+deploymentLocalReuse: false
 persistAnnotation: permabox.io/persist
 
 # Choose at least one target label. Start with kubernetes.io/hostname for a

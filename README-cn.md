@@ -4,7 +4,7 @@
 
 PermaBox 让 Kubernetes Pod 在同一台 Linux 节点上重建后，仍能读取容器根文件系统中此前写入的数据。它包装兼容 runc 的 OCI 运行时，在节点上挂载本地 OverlayFS 可写层。业务容器无需以特权模式运行。
 
-PermaBox 适用于 Pod 名称稳定的工作负载，例如 StatefulSet。可写层按存储根目录、命名空间和 Pod 名称查找，每个 Pod 支持一个持久化容器。它不会跨节点迁移数据，也不管理独立挂载的卷或提供备份。应用数据需要由 Kubernetes 单独管理时，请使用 PersistentVolume。
+默认按存储根目录、命名空间和 Pod 名称查找可写层，每个 Pod 支持一个持久化容器。这适用于 StatefulSet 等 Pod 名称稳定的工作负载。[Deployment 节点本地复用](deploy/k3s/README-cn.md#deployment-节点本地复用)需要同时通过 Helm 和 Pod 模板启用，允许同一节点上符合条件的替换 Pod 复用写层。PermaBox 不会跨节点迁移数据，也不管理独立挂载的卷或提供备份。应用数据需要由 Kubernetes 单独管理时，请使用 PersistentVolume。
 
 ## 功能
 

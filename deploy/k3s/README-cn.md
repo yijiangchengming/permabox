@@ -62,11 +62,35 @@ Chart 将同一套 `nodeSelector` 和 `tolerations` 应用于安装器和 Runtim
 | `gcOnScaleToZero` | `false`；设为 `true` 后，Deployment 或 StatefulSet 的 `spec.replicas` 为 `0` 时回收其已安全释放的写层 |
 | `gcWorkloadAnnotations` | `false`；设为 `true` 后，允许 Pod 模板注解单独覆盖上面两项默认值 |
 | `gcIntervalSeconds` | `60`；每次 GC 前等待的秒数（正整数） |
+| `deploymentLocalReuse` | `false`；设为 `true` 后，允许显式启用该功能的 Deployment Pod 复用同一节点上符合条件且已释放的写层 |
 | `persistAnnotation` | `permabox.io/persist`；更改后须同步修改业务 Pod |
 
 在 Pod 上用 `permabox.io/storage-root` 为选中的持久化容器指定存储别名，用 `permabox.io/underlying-runtime` 为业务容器指定运行时别名；sandbox 使用创建时的默认运行时。参见[别名配置](../README-cn.md#1-安装到目标节点)。升级时请使用新的发布镜像标签，或用新标签推送自定义构建。仍存在容器记录时，安装器允许单独修改工作负载回收开关，修改其他运行时配置前请先停止 PermaBox 工作负载。
 
 安装器通过 `permabox validate-config` 验证暂存的配置，验证成功后才发布。默认运行时和别名均不得指向安装器包装器 `/opt/permabox-k3s/runtime`，否则会递归调用 PermaBox。
+
+## Deployment 节点本地复用
+
+安装或升级 Helm release 时传入 `--set deploymentLocalReuse=true`，然后在 **Deployment 的 Pod 模板**中添加以下两个注解，并使用 `permabox` RuntimeClass：
+
+```yaml
+spec:
+  template:
+    metadata:
+      annotations:
+        permabox.io/persist: "true"
+        permabox.io/reuse-policy: "deployment-local"
+    spec:
+      runtimeClassName: permabox
+```
+
+PermaBox 优先查找已分配给同一个 Pod 且符合条件的写层。找不到时，只在当前节点查找已释放的写层，并要求 Deployment UID 已验证且相同，容器名、镜像标识和底层运行时也必须匹配。复用不绑定副本序号。找不到合格写层时，例如更换了镜像，或替换 Pod 被调度到没有匹配写层的其他节点，PermaBox 会分配全新的写层。数据不会在节点之间迁移。
+
+创建容器时必须能访问 Kubernetes API，以验证 Pod → ReplicaSet → Deployment 的归属链及各对象的 UID。无法验证归属时，启用本功能的容器将拒绝启动。Helm 为安装器授予所需的 API 只读权限，无需额外部署控制器或 webhook。
+
+未同时通过 Helm 和 Pod 模板启用时，既有的按 Pod 名称持久化行为保持不变，包括 StatefulSet。节点本地复用不会关闭回收：空闲 TTL 及工作负载回收策略仍然生效，启用后也可继续使用[工作负载级覆盖](#按工作负载覆盖回收策略)。
+
+## 工作负载回收
 
 两项工作负载回收策略可独立开启，例如 Helm 的 `--set gcOnWorkloadDelete=true --set gcOnScaleToZero=true`。开启后，Helm 为安装器创建只读权限；宿主机无需配置 kubeconfig。容器卸载完成且 API 已确认满足条件时，立即尝试回收。宿主机定期 GC 会补查此前已释放或尚未确认的写层，通常在下一轮完成，默认每轮间隔 60 秒。两项策略都无需等待 `gcIdleTTL`；TTL 仍独立生效。
 

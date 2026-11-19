@@ -51,6 +51,7 @@ helm upgrade --install permabox "$chart" -n "$installer_ns" --create-namespace \
   --set-string image.repository=docker.io/library/permabox-installer --set-string image.tag=ci \
   --set-string image.pullPolicy=Never --set-string storageRoot="$storage" \
   --set gcOnScaleToZero=true --set gcOnWorkloadDelete=true --set gcIntervalSeconds=5 \
+  --set deploymentLocalReuse=true --set gcWorkloadAnnotations=true \
   --timeout 2m
 wait_for installer_ready
 k get runtimeclass permabox -o json | jq -e '.handler == "permabox"'
@@ -102,6 +103,8 @@ sudo test -d "$slot/upper"
 demo delete statefulset permabox-demo --cascade=foreground --wait=false
 wait_for workload_stopped
 wait_for sudo test ! -e "$slot"
+
+bash deploy/k3s/deployment_smoke_test.sh "$storage"
 
 echo 'Removing the runtime and uninstalling the chart'
 helm upgrade permabox "$chart" -n "$installer_ns" --reuse-values --set mode=remove --timeout 2m

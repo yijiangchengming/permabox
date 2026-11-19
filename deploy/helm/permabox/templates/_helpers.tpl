@@ -6,6 +6,14 @@
 {{- printf "%s-gc-%s" .Release.Name (.Release.Namespace | sha256sum | trunc 10) -}}
 {{- end -}}
 
+{{- define "permabox.workloadBridgeEnabled" -}}
+{{- if and (eq .Values.mode "install") (or .Values.gcOnWorkloadDelete .Values.gcOnScaleToZero .Values.gcWorkloadAnnotations .Values.deploymentLocalReuse) -}}
+true
+{{- else -}}
+false
+{{- end -}}
+{{- end -}}
+
 {{- define "permabox.selectorLabels" -}}
 app.kubernetes.io/name: permabox-installer
 app.kubernetes.io/instance: {{ .Release.Name | quote }}

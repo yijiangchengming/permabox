@@ -64,11 +64,33 @@ The chart applies the same `nodeSelector` and `tolerations` to the installer and
 | `gcOnScaleToZero` | `false`. Enable to reclaim safely released writable layers when their Deployment or StatefulSet has `spec.replicas: 0`. |
 | `gcWorkloadAnnotations` | `false`. Enable to let Pod template annotations override the two workload GC defaults individually. |
 | `gcIntervalSeconds` | `60`. A positive integer giving the wait in seconds before each GC sweep. |
+| `deploymentLocalReuse` | `false`. Enable to allow opted-in Deployment Pods to reuse compatible released layers on the same node. |
 | `persistAnnotation` | `permabox.io/persist`. Update the workload Pod annotations if you change this key. |
 
 Use `permabox.io/storage-root` to set a storage alias for the container selected for persistence. Use `permabox.io/underlying-runtime` to set a runtime alias for the workload containers. The sandbox uses the default runtime from the time it was created. See [storage and runtime aliases](../README.md#1-install-on-the-target-node). When upgrading, use a new release image tag or push your custom build with a new tag. While container records still exist, the installer permits changes to the workload GC switches alone. Stop PermaBox workloads before changing other runtime settings.
 
 The installer runs `permabox validate-config` on the staged configuration before publishing it. The default runtime and any runtime alias must not point to `/opt/permabox-k3s/runtime`, because that would call PermaBox recursively.
+
+## Deployment local reuse
+
+Set `--set deploymentLocalReuse=true` when installing or upgrading the Helm release. Then add both annotations to the **Deployment's Pod template**, using the `permabox` RuntimeClass:
+
+```yaml
+spec:
+  template:
+    metadata:
+      annotations:
+        permabox.io/persist: "true"
+        permabox.io/reuse-policy: "deployment-local"
+    spec:
+      runtimeClassName: permabox
+```
+
+PermaBox checks for a compatible layer already assigned to the same Pod first. Otherwise, it looks on the current node for a released layer from the same verified Deployment UID, matching the container name, image identity, and underlying runtime. A match is not tied to a replica ordinal. If no eligible layer is found, including when the image changes or the replacement lands on a different node with no matching layer, PermaBox allocates a fresh layer. It does not move data between nodes.
+
+The Kubernetes API must be reachable at container creation so PermaBox can verify the Pod → ReplicaSet → Deployment owner chain and its UIDs. The opted-in container fails to start if ownership cannot be verified. Helm grants the installer read-only API access for this check. No controller or webhook is required.
+
+Existing Pod-name persistence, including StatefulSets, stays unchanged without both opt-ins. Local reuse does not disable garbage collection: the idle TTL and workload GC policies still apply, including [per-workload overrides](#override-gc-per-workload) when enabled.
 
 ## Workload garbage collection
 

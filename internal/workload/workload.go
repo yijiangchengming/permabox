@@ -22,6 +22,7 @@ type Owner struct {
 const (
 	deleteAnnotation      = "permabox.io/gc-on-workload-delete"
 	scaleToZeroAnnotation = "permabox.io/gc-on-scale-to-zero"
+	reusePolicyAnnotation = "permabox.io/reuse-policy"
 )
 
 type Overrides struct {
@@ -78,6 +79,9 @@ type object struct {
 	Spec struct {
 		Replicas *int32 `json:"replicas,omitempty"`
 	} `json:"spec"`
+	Status *struct {
+		Phase string `json:"phase,omitempty"`
+	} `json:"status,omitempty"`
 }
 
 type Client struct {
@@ -185,6 +189,57 @@ func (c Client) Resolve(ctx context.Context, namespace, pod, uid string) (Owner,
 		}
 	}
 	return Owner{}, nil
+}
+
+// ResolveDeployment returns a verified, non-deleting Deployment for a Pod
+// that opted into deployment-local reuse. A zero Owner means no eligible match.
+func (c Client) ResolveDeployment(ctx context.Context, namespace, pod, uid string) (Owner, error) {
+	if uid == "" {
+		return Owner{}, nil
+	}
+	active := func(kind, name, uid string) (object, bool, error) {
+		obj, err := c.get(ctx, kind, namespace, name)
+		if errors.Is(err, errNotFound) {
+			return obj, false, nil
+		}
+		return obj, err == nil && obj.Metadata.UID == uid && obj.Metadata.DeletionTimestamp == nil, err
+	}
+	podObj, ok, err := active("Pod", pod, uid)
+	if !ok || podObj.Metadata.Annotations[reusePolicyAnnotation] != "deployment-local" {
+		return Owner{}, err
+	}
+	rsRef := controller(podObj)
+	if rsRef.Kind != "ReplicaSet" {
+		return Owner{}, nil
+	}
+	rs, ok, err := active(rsRef.Kind, rsRef.Name, rsRef.UID)
+	if !ok {
+		return Owner{}, err
+	}
+	depRef := controller(rs)
+	if depRef.Kind != "Deployment" {
+		return Owner{}, nil
+	}
+	if _, ok, err := active(depRef.Kind, depRef.Name, depRef.UID); !ok {
+		return Owner{}, err
+	}
+	return Owner{Namespace: namespace, Kind: depRef.Kind, Name: depRef.Name, UID: depRef.UID,
+		Overrides: readOverrides(podObj.Metadata.Annotations)}, nil
+}
+
+// PodFinished checks whether the API confirms that this Pod UID is gone or terminal.
+func (c Client) PodFinished(ctx context.Context, namespace, name, uid string) (bool, error) {
+	if uid == "" {
+		return false, nil
+	}
+	obj, err := c.get(ctx, "Pod", namespace, name)
+	if errors.Is(err, errNotFound) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return obj.Metadata.UID != uid || (obj.Status != nil && (obj.Status.Phase == "Succeeded" || obj.Status.Phase == "Failed")), nil
 }
 
 func (c Client) Reclaim(ctx context.Context, owner Owner, onDelete, onZero bool) (bool, error) {

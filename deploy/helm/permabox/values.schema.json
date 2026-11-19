@@ -35,6 +35,7 @@
     "gcOnScaleToZero": { "type": "boolean" },
     "gcWorkloadAnnotations": { "type": "boolean" },
     "gcIntervalSeconds": { "type": "integer", "minimum": 1 },
+    "deploymentLocalReuse": { "type": "boolean" },
     "persistAnnotation": { "type": "string", "minLength": 1 },
     "nodeSelector": {
       "type": "object",

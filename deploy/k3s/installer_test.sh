@@ -7,11 +7,12 @@ source ./installer.sh
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 export HOST_ROOT="$tmp/host" OWNER=default/permabox K3S_DATA_DIR=/data
-export READY_FILE="$tmp/ready" PAYLOAD="$tmp/permabox" RESTART_TIMEOUT=2
+export READY_FILE="$tmp/ready" PAYLOAD="$tmp/permabox" RESTART_TIMEOUT=2 BRIDGE_LOG="$tmp/bridge"
 mkdir -p "$HOST_ROOT/data/agent/etc/containerd" "$HOST_ROOT/data/data/current/bin" "$HOST_ROOT/run"
 # The fixture expands these variables when invoked as the payload.
 # shellcheck disable=SC2016
 printf '%s\n' '#!/bin/sh' \
+  'if [ "$#" -eq 2 ] && [ "$1" = serve-workloads ]; then printf "%s\n" "$2" >>"$BRIDGE_LOG"; exit 0; fi' \
   '[ "$#" -eq 1 ] && [ "$1" = validate-config ] || exit 1' \
   'case "$PERMABOX_CONFIG" in "$HOST_ROOT"/opt/permabox-k3s/.stage.*/config.yaml) ;; *) exit 1 ;; esac' \
   '[ -s "$PERMABOX_CONFIG" ] && [ "${reject_config:-0}" = 0 ]' >"$PAYLOAD"
@@ -88,7 +89,8 @@ grep -Fq 'plugins."io.containerd.cri.v1.runtime"' "$templates/config-v3.toml.tmp
 test -x "$HOST_ROOT/opt/permabox-k3s/runtime"
 test -f "$READY_FILE"
 jq -e '.storage_root == "/var/lib/permabox/storage" and .underlying_runtime == "/data/data/current/bin/runc" and
-       .storage_roots == {} and .underlying_runtimes == {} and .gc_idle_ttl == "0s"' \
+       .storage_roots == {} and .underlying_runtimes == {} and .gc_idle_ttl == "0s" and
+       (has("deployment_local_reuse") or has("cri_endpoint") or has("k3s_bin") | not)' \
   "$HOST_ROOT/opt/permabox-k3s/config.yaml" >/dev/null
 jq -e '.config.containerd.runtimes.permabox.PodAnnotations | sort ==
        ["permabox.io/container", "permabox.io/persist", "permabox.io/storage-root", "permabox.io/underlying-runtime"]' "$tmp/live" >/dev/null
@@ -187,5 +189,31 @@ fi
 cmp "$tmp/original-v2" "$templates/config.toml.tmpl"
 test ! -e "$READY_FILE"
 test ! -e "$tmp/slept-after-failure"
+
+unset fail_restart
+(
+  export DEPLOYMENT_LOCAL_REUSE=true K3S_CRI_ENDPOINT=unix:///custom/cri.sock K3S_BIN=/custom/bin/k3s
+  export GC_ON_WORKLOAD_DELETE=false GC_ON_SCALE_TO_ZERO=false GC_WORKLOAD_ANNOTATIONS=false
+  # Wait for the mocked bridge invocation, then stop before the next sweep.
+  sleep() {
+    for ((i=0; i<50; i++)); do
+      [[ -s $BRIDGE_LOG ]] && break
+      command sleep 0.02
+    done
+    return 1
+  }
+  main
+  test "$(<"$BRIDGE_LOG")" = "$HOST_ROOT/opt/permabox-k3s/workload.sock"
+  jq -e '.deployment_local_reuse == true and .cri_endpoint == "unix:///custom/cri.sock" and
+         .k3s_bin == "/custom/bin/k3s" and
+         (has("gc_on_workload_delete") or has("gc_on_scale_to_zero") or has("gc_workload_annotations") | not)' \
+    "$HOST_ROOT/opt/permabox-k3s/config.yaml" >/dev/null
+  jq -e '.config.containerd.runtimes.permabox.PodAnnotations | index("permabox.io/reuse-policy") != null' "$tmp/live" >/dev/null
+  live_missing=$(jq '.config.containerd.runtimes.permabox.PodAnnotations -= ["permabox.io/reuse-policy"]' "$tmp/live")
+  annotation=permabox.io/persist systemd=true DEPLOYMENT_LOCAL_REUSE=false desired_handler "$live_missing"
+  if annotation=permabox.io/persist systemd=true desired_handler "$live_missing"; then
+    printf '%s\n' 'accepted a live handler missing the reuse annotation with reuse enabled' >&2; exit 1
+  fi
+)
 
 printf '%s\n' 'Installer lifecycle tests passed'

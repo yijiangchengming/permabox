@@ -110,16 +110,7 @@ func run(cfg config.Config, manager mount.Manager, args []string) int {
 				return 1
 			}
 			if bundle := options.Persistence; bundle != nil {
-				slot := filepath.Join(storage, bundle.Namespace, bundle.Pod)
-				var owner workload.Owner
-				if cfg.WorkloadGC() {
-					var lookupErr error
-					owner, lookupErr = workloadClient(cfg).Resolve(context.Background(), bundle.Namespace, bundle.Pod, bundle.PodUID)
-					if lookupErr != nil {
-						report("create %s: could not identify workload for GC: %v", inv.ID, lookupErr)
-					}
-				}
-				installed, err = manager.PrepareOwned(inv.ID, bundle.Root, slot, bundle.Container, owner)
+				installed, err = preparePersistence(cfg, manager, inv.ID, bundle, storage, runtime, report)
 				if err != nil {
 					managed, inspectErr := manager.Managed(inv.ID)
 					if pinnedNow && !managed && inspectErr == nil {
@@ -204,6 +195,39 @@ func run(cfg config.Config, manager mount.Manager, args []string) int {
 		return 1
 	}
 	return 0
+}
+
+func preparePersistence(cfg config.Config, manager mount.Manager, id string, bundle *oci.Bundle, storage, runtime string, report func(string, ...any)) (bool, error) {
+	client := workloadClient(cfg)
+	if bundle.ReusePolicy == "deployment-local" {
+		if !cfg.DeploymentLocalReuse {
+			return false, errors.New("deployment-local reuse is disabled on this node")
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		owner, err := client.ResolveDeployment(ctx, bundle.Namespace, bundle.Pod, bundle.PodUID)
+		if err != nil {
+			return false, fmt.Errorf("verify Deployment owner: %w", err)
+		}
+		image, err := oci.ContainerImageID(ctx, cfg.K3sBin, cfg.CRIEndpoint, id)
+		if err != nil {
+			report("create %s: no verified image identity; using a fresh Deployment layer: %v", id, err)
+		}
+		claim := mount.DeploymentClaim{Pod: bundle.Pod, PodUID: bundle.PodUID, Image: image, Runtime: runtime}
+		return manager.PrepareDeployment(ctx, id, bundle.Root, storage, bundle.Container, owner, claim, cfg.GCIdleTTL,
+			func(ctx context.Context, name, uid string) (bool, error) {
+				return client.PodFinished(ctx, bundle.Namespace, name, uid)
+			})
+	}
+	var owner workload.Owner
+	if cfg.WorkloadGC() {
+		var err error
+		owner, err = client.Resolve(context.Background(), bundle.Namespace, bundle.Pod, bundle.PodUID)
+		if err != nil {
+			report("create %s: could not identify workload for GC: %v", id, err)
+		}
+	}
+	return manager.PrepareOwned(id, bundle.Root, filepath.Join(storage, bundle.Namespace, bundle.Pod), bundle.Container, owner)
 }
 
 func collect(cfg config.Config, manager mount.Manager, routing routes) int {

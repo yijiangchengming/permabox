@@ -31,6 +31,9 @@ type Config struct {
 	GCOnScaleToZero       bool              `yaml:"gc_on_scale_to_zero"`
 	GCWorkloadAnnotations bool              `yaml:"gc_workload_annotations"`
 	WorkloadSocket        string            `yaml:"workload_socket"`
+	DeploymentLocalReuse  bool              `yaml:"deployment_local_reuse"`
+	CRIEndpoint           string            `yaml:"cri_endpoint"`
+	K3sBin                string            `yaml:"k3s_bin"`
 }
 
 var aliasPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,62}$`)
@@ -70,6 +73,13 @@ func Load() (Config, error) {
 	}
 	if cfg.WorkloadSocket != "" && (!validPath(cfg.WorkloadSocket) || filepath.Clean(cfg.WorkloadSocket) != cfg.WorkloadSocket) {
 		return cfg, errors.New("workload_socket must be a clean absolute path")
+	}
+	if cfg.DeploymentLocalReuse {
+		path, ok := strings.CutPrefix(cfg.CRIEndpoint, "unix://")
+		if !ok || !validPath(path) || filepath.Clean(path) != path ||
+			!validPath(cfg.K3sBin) || filepath.Clean(cfg.K3sBin) != cfg.K3sBin {
+			return cfg, errors.New("deployment_local_reuse requires a local Unix cri_endpoint and an absolute k3s_bin")
+		}
 	}
 	for _, choices := range []map[string]string{cfg.StorageRoots, cfg.UnderlyingRuntimes} {
 		for alias, path := range choices {

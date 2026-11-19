@@ -61,12 +61,14 @@ our_handler() {
 }
 
 desired_handler() {
-  our_handler "$1" && jq -e --arg annotation "$annotation" --argjson systemd "$systemd" '
+  our_handler "$1" && jq -e --arg annotation "$annotation" --argjson systemd "$systemd" \
+    --arg reuse "${DEPLOYMENT_LOCAL_REUSE:-false}" '
     .config.containerd.runtimes.permabox | .runtimeType == "io.containerd.runc.v2" and
     (.options.SystemdCgroup // false) == $systemd and
     ((.PodAnnotations // .podAnnotations // []) | index($annotation) != null and
       index("permabox.io/container") != null and index("permabox.io/storage-root") != null and
-      index("permabox.io/underlying-runtime") != null)
+      index("permabox.io/underlying-runtime") != null and
+      ($reuse != "true" or index("permabox.io/reuse-policy") != null))
   ' >/dev/null <<<"$1"
 }
 
@@ -107,6 +109,7 @@ write_runtime() {
     --argjson storage_roots "${STORAGE_ROOTS:-$empty_map}" --argjson runtimes "${UNDERLYING_RUNTIMES:-$empty_map}" \
     --argjson on_delete "${GC_ON_WORKLOAD_DELETE:-false}" --argjson on_zero "${GC_ON_SCALE_TO_ZERO:-false}" \
     --argjson workload_annotations "${GC_WORKLOAD_ANNOTATIONS:-false}" \
+    --argjson reuse "${DEPLOYMENT_LOCAL_REUSE:-false}" --arg endpoint "$endpoint" --arg k3s "$k3s_bin" \
     --arg ttl "${GC_IDLE_TTL:-0s}" --arg wrapper "$wrapper" '
       if $runtime == $wrapper or any($runtimes[]?; . == $wrapper) then
         error("an underlying runtime cannot point to the PermaBox installer wrapper")
@@ -117,6 +120,7 @@ write_runtime() {
         + (if $on_delete == false then {} else {gc_on_workload_delete: $on_delete} end)
         + (if $on_zero == false then {} else {gc_on_scale_to_zero: $on_zero} end)
         + (if $workload_annotations == false then {} else {gc_workload_annotations: $workload_annotations} end)
+        + (if $reuse == false then {} else {deployment_local_reuse: $reuse, cri_endpoint: $endpoint, k3s_bin: $k3s} end)
       end
     ' >"$tmpdir/config.yaml" || return 1
   PERMABOX_CONFIG="$tmpdir/config.yaml" "$payload" validate-config || {
@@ -217,14 +221,15 @@ reconcile() (
   fi
 
   if [[ $mode == install ]]; then
-    local asset
+    local asset reuse_annotation=''
+    if [[ ${DEPLOYMENT_LOCAL_REUSE:-false} == true ]]; then reuse_annotation=', "permabox.io/reuse-policy"'; fi
     for asset in owner config.yaml permabox runtime; do
       if [[ -f $install_host/$asset ]]; then cp -p "$install_host/$asset" "$tmpdir/old-$asset" || return 1; fi
     done
     write_runtime "$tmpdir" || return 1
     printf '%s\n' "$OWNER" >"$tmpdir/owner" && mv -T "$tmpdir/owner" "$install_host/owner" || return 1
-    printf '%s\n[plugins."%s".containerd.runtimes.permabox]\n  runtime_type = "io.containerd.runc.v2"\n  pod_annotations = ["%s", "permabox.io/container", "permabox.io/storage-root", "permabox.io/underlying-runtime"]\n[plugins."%s".containerd.runtimes.permabox.options]\n  BinaryName = "%s"\n  SystemdCgroup = %s\n%s\n' \
-      "$begin" "$plugin" "$annotation" "$plugin" "$wrapper" "$systemd" "$end" >>"$candidate"
+    printf '%s\n[plugins."%s".containerd.runtimes.permabox]\n  runtime_type = "io.containerd.runc.v2"\n  pod_annotations = ["%s", "permabox.io/container", "permabox.io/storage-root", "permabox.io/underlying-runtime"%s]\n[plugins."%s".containerd.runtimes.permabox.options]\n  BinaryName = "%s"\n  SystemdCgroup = %s\n%s\n' \
+      "$begin" "$plugin" "$annotation" "$reuse_annotation" "$plugin" "$wrapper" "$systemd" "$end" >>"$candidate"
   fi
 
   local changed=0
@@ -278,7 +283,8 @@ main() {
     sleep_interval infinity
     return
   fi
-  if [[ ${GC_ON_WORKLOAD_DELETE:-false} == true || ${GC_ON_SCALE_TO_ZERO:-false} == true || ${GC_WORKLOAD_ANNOTATIONS:-false} == true ]]; then
+  if [[ ${GC_ON_WORKLOAD_DELETE:-false} == true || ${GC_ON_SCALE_TO_ZERO:-false} == true ||
+        ${GC_WORKLOAD_ANNOTATIONS:-false} == true || ${DEPLOYMENT_LOCAL_REUSE:-false} == true ]]; then
     "${PAYLOAD:-/usr/local/lib/permabox/permabox}" serve-workloads "$socket" &
     bridge_pid=$!
   fi

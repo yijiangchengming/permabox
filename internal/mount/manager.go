@@ -31,6 +31,7 @@ type record struct {
 	OverlayID    int             `json:"overlay_mount_id,omitempty"`
 	ReleasedAt   time.Time       `json:"released_at,omitempty"`
 	PendingOwner *workload.Owner `json:"pending_workload_owner,omitempty"`
+	Deployment   *deploymentSlot `json:"deployment_claim,omitempty"`
 }
 
 func (r record) MarshalJSON() ([]byte, error) {
@@ -56,6 +57,10 @@ func (m Manager) Prepare(id, root, slot, container string) (bool, error) {
 }
 
 func (m Manager) PrepareOwned(id, root, slot, container string, owner workload.Owner) (bool, error) {
+	return m.prepareOwned(id, root, slot, container, owner, nil, nil)
+}
+
+func (m Manager) prepareOwned(id, root, slot, container string, owner workload.Owner, claim *deploymentSlot, selectSlot func() (string, error)) (bool, error) {
 	if !oci.ValidID(id) {
 		return false, errors.New("invalid container ID")
 	}
@@ -75,6 +80,26 @@ func (m Manager) PrepareOwned(id, root, slot, container string, owner workload.O
 		return false, err
 	}
 	defer lock.Close()
+	if selectSlot != nil {
+		prev, err := readRecord(m.journal(id))
+		switch {
+		case err == nil:
+			if prev.Deployment == nil || *prev.Deployment != *claim || filepath.Dir(prev.Slot) != filepath.Dir(slot) {
+				return false, errors.New("container ID already has a different deployment claim")
+			}
+			slot = prev.Slot
+		case errors.Is(err, os.ErrNotExist):
+			candidate, err := selectSlot()
+			if err != nil {
+				return false, err
+			}
+			if candidate != "" {
+				slot = candidate
+			}
+		default:
+			return false, err
+		}
+	}
 	if isRetiredPath(slot) {
 		return false, errors.New("reserved storage slot path")
 	}
@@ -96,7 +121,7 @@ func (m Manager) PrepareOwned(id, root, slot, container string, owner workload.O
 	if err != nil {
 		return false, err
 	}
-	want := record{Namespace: ns, Root: root, Slot: slot, PendingOwner: &owner}
+	want := record{Namespace: ns, Root: root, Slot: slot, PendingOwner: &owner, Deployment: claim}
 	prev, err := readRecord(m.journal(id))
 	switch {
 	case err == nil:
@@ -182,6 +207,11 @@ func (m Manager) ActivateOwnership(id string) error {
 		return err
 	}
 	path := filepath.Join(state.Slot, workloadMarker)
+	if state.Deployment != nil {
+		if err := writeRecord(filepath.Join(state.Slot, deploymentMarker), state.Deployment); err != nil {
+			return err
+		}
+	}
 	if state.PendingOwner.Valid() {
 		return writeRecord(path, state.PendingOwner)
 	}
