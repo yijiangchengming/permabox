@@ -1,0 +1,21 @@
+PermaBox installer mode: {{ .Values.mode }}
+
+Helm can create the release before node changes finish. Check the rollout:
+  kubectl -n {{ .Release.Namespace }} rollout status daemonset/{{ include "permabox.installerName" . }}
+  kubectl -n {{ .Release.Namespace }} get daemonset {{ include "permabox.installerName" . }}
+
+Confirm that DESIRED is nonzero and includes every intended node, and that
+all intended installer Pods are Ready. A rollout with no target nodes does
+not verify any node changes. The installer may restart the K3s service.
+{{ if eq .Values.mode "install" }}
+Use runtimeClassName: permabox only after verification. The RuntimeClass
+exists before the node installer finishes and does not check node readiness.
+
+Before removal, stop PermaBox workloads. Upgrade this same release in the
+same namespace with mode=remove and the same target nodes and K3s settings.
+{{ else }}
+This release omits the RuntimeClass in remove mode. After confirming cleanup
+on every previously installed node, uninstall the Helm release:
+  helm uninstall {{ .Release.Name }} --namespace {{ .Release.Namespace }}
+{{ end }}
+Helm uninstall alone does not clean up the host installation.

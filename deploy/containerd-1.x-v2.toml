@@ -1,0 +1,11 @@
+# Merge into the existing containerd 1.x configuration; keep one top-level version.
+version = 2
+
+[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.permabox]
+  runtime_type = "io.containerd.runc.v2"
+  pod_annotations = ["permabox.io/persist", "permabox.io/container", "permabox.io/storage-root", "permabox.io/underlying-runtime"]
+
+[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.permabox.options]
+  BinaryName = "/usr/local/bin/permabox"
+  # Match the node's cgroup driver (true for systemd).
+  SystemdCgroup = true

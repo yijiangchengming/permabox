@@ -1,0 +1,14 @@
+# Install as /etc/permabox/config.yaml on the selected node.
+storage_root: /var/lib/permabox/storage
+underlying_runtime: /usr/bin/runc
+# Optional aliases for permabox.io/storage-root and permabox.io/underlying-runtime.
+storage_roots: {}
+underlying_runtimes: {}
+# Go duration. Zero retains released data; GC still retries stale cleanup.
+gc_idle_ttl: "0s"
+# These require a local Kubernetes metadata bridge (configured by the K3s chart).
+gc_on_workload_delete: false
+gc_on_scale_to_zero: false
+gc_workload_annotations: false
+log_file: /var/log/permabox.log
+persist_annotation: permabox.io/persist

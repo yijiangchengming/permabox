@@ -1,0 +1,44 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: permabox-demo
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: permabox-demo
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: permabox-demo
+spec:
+  serviceName: permabox-demo
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: permabox-demo
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: permabox-demo
+      annotations:
+        permabox.io/persist: "true"
+        permabox.io/container: demo
+    spec:
+      runtimeClassName: permabox
+      automountServiceAccountToken: false
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: demo
+          image: alpine:3.22
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sleep", "86400"]
+          securityContext:
+            runAsUser: 0
+            privileged: false
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop: ["ALL"]

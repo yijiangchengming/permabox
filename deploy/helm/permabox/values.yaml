@@ -1,0 +1,37 @@
+mode: install
+
+image:
+  # Set to the installer image repository (without a tag).
+  repository: ""
+  # An empty tag uses the chart appVersion.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+k3s:
+  dataDir: /var/lib/rancher/k3s
+  criEndpoint: unix:///run/k3s/containerd/containerd.sock
+  service: auto
+  bin: /usr/local/bin/k3s
+
+storageRoot: /var/lib/permabox/storage
+# Empty selects runc from the K3s data/current/bin directory.
+underlyingRuntime: ""
+# Aliases for the fixed Pod annotations; values are absolute host paths.
+storageRoots: {}
+underlyingRuntimes: {}
+# Zero retains released data; the periodic sweep still retries stale cleanup.
+gcIdleTTL: "0s"
+# Opt in to reclaiming released data without waiting for gcIdleTTL.
+gcOnWorkloadDelete: false
+gcOnScaleToZero: false
+# Allow Pod template annotations to override the two defaults above.
+gcWorkloadAnnotations: false
+gcIntervalSeconds: 60
+persistAnnotation: permabox.io/persist
+
+# Choose at least one target label. Start with kubernetes.io/hostname for a
+# single node. The chart also requires kubernetes.io/os=linux.
+nodeSelector: {}
+# Allow selecting several nodes that may restart at the same time on initial install.
+allowParallelInstall: false
+tolerations: []

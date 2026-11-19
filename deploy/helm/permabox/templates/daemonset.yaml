@@ -1,0 +1,86 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "permabox.installerName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "permabox.selectorLabels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "permabox.selectorLabels" . | nindent 6 }}
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        {{- include "permabox.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- $workloadGC := and (eq .Values.mode "install") (or .Values.gcOnWorkloadDelete .Values.gcOnScaleToZero .Values.gcWorkloadAnnotations) }}
+      automountServiceAccountToken: {{ $workloadGC }}
+      {{- if $workloadGC }}
+      serviceAccountName: {{ include "permabox.workloadGCName" . }}
+      {{- end }}
+      hostPID: true
+      {{- include "permabox.scheduling" . | nindent 6 }}
+      containers:
+        - name: installer
+          image: {{ printf "%s:%s" (required "set image.repository to the PermaBox installer image repository" .Values.image.repository) (default .Chart.AppVersion .Values.image.tag) | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/usr/local/bin/permabox-k3s"]
+          securityContext:
+            privileged: true
+            runAsUser: 0
+          env:
+            - name: MODE
+              value: {{ .Values.mode | quote }}
+            - name: OWNER
+              value: {{ printf "%s/%s" .Release.Namespace .Release.Name | quote }}
+            - name: HOST_ROOT
+              value: /host
+            - name: K3S_DATA_DIR
+              value: {{ .Values.k3s.dataDir | quote }}
+            - name: K3S_CRI_ENDPOINT
+              value: {{ .Values.k3s.criEndpoint | quote }}
+            - name: K3S_SERVICE
+              value: {{ .Values.k3s.service | quote }}
+            - name: K3S_BIN
+              value: {{ .Values.k3s.bin | quote }}
+            - name: STORAGE_ROOT
+              value: {{ .Values.storageRoot | quote }}
+            - name: UNDERLYING_RUNTIME
+              value: {{ .Values.underlyingRuntime | quote }}
+            - name: STORAGE_ROOTS
+              value: {{ default dict .Values.storageRoots | toJson | quote }}
+            - name: UNDERLYING_RUNTIMES
+              value: {{ default dict .Values.underlyingRuntimes | toJson | quote }}
+            - name: GC_IDLE_TTL
+              value: {{ default "0s" .Values.gcIdleTTL | quote }}
+            - name: GC_ON_WORKLOAD_DELETE
+              value: {{ .Values.gcOnWorkloadDelete | quote }}
+            - name: GC_ON_SCALE_TO_ZERO
+              value: {{ .Values.gcOnScaleToZero | quote }}
+            - name: GC_WORKLOAD_ANNOTATIONS
+              value: {{ .Values.gcWorkloadAnnotations | quote }}
+            - name: GC_INTERVAL_SECONDS
+              value: {{ default 60 .Values.gcIntervalSeconds | quote }}
+            - name: PERSIST_ANNOTATION
+              value: {{ .Values.persistAnnotation | quote }}
+          readinessProbe:
+            exec:
+              {{- if $workloadGC }}
+              command: ["/bin/sh", "-c", "test -f /tmp/permabox-ready && /usr/local/lib/permabox/permabox check-workload-bridge /host/opt/permabox-k3s/workload.sock"]
+              {{- else }}
+              command: ["test", "-f", "/tmp/permabox-ready"]
+              {{- end }}
+          volumeMounts:
+            - name: host-root
+              mountPath: /host
+              readOnly: false
+      volumes:
+        - name: host-root
+          hostPath:
+            path: /
+            type: Directory

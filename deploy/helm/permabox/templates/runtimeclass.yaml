@@ -1,0 +1,9 @@
+{{- if eq .Values.mode "install" -}}
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: permabox
+handler: permabox
+scheduling:
+  {{- include "permabox.scheduling" . | nindent 2 }}
+{{- end }}

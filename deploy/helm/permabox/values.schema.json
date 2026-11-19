@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["mode", "image", "k3s", "storageRoot", "underlyingRuntime", "persistAnnotation", "nodeSelector", "allowParallelInstall", "tolerations"],
+  "properties": {
+    "mode": { "enum": ["install", "remove"] },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "tag", "pullPolicy"],
+      "properties": {
+        "repository": { "type": "string", "minLength": 1, "pattern": "^\\S+$" },
+        "tag": { "type": "string", "pattern": "^([A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?$" },
+        "pullPolicy": { "enum": ["Always", "IfNotPresent", "Never"] }
+      }
+    },
+    "k3s": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dataDir", "criEndpoint", "service", "bin"],
+      "properties": {
+        "dataDir": { "type": "string", "pattern": "^/.+" },
+        "criEndpoint": { "type": "string", "pattern": "^unix:///.+" },
+        "service": { "type": "string", "minLength": 1 },
+        "bin": { "type": "string", "pattern": "^/.+" }
+      }
+    },
+    "storageRoot": { "type": "string", "pattern": "^/.+" },
+    "underlyingRuntime": { "type": "string", "pattern": "^(/.+)?$" },
+    "storageRoots": { "$ref": "#/definitions/absolutePathMap" },
+    "underlyingRuntimes": { "$ref": "#/definitions/absolutePathMap" },
+    "gcIdleTTL": { "type": "string", "minLength": 1 },
+    "gcOnWorkloadDelete": { "type": "boolean" },
+    "gcOnScaleToZero": { "type": "boolean" },
+    "gcWorkloadAnnotations": { "type": "boolean" },
+    "gcIntervalSeconds": { "type": "integer", "minimum": 1 },
+    "persistAnnotation": { "type": "string", "minLength": 1 },
+    "nodeSelector": {
+      "type": "object",
+      "properties": { "kubernetes.io/os": { "const": "linux" } },
+      "additionalProperties": { "type": "string" }
+    },
+    "allowParallelInstall": { "type": "boolean" },
+    "tolerations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "key": { "type": "string" },
+          "operator": { "enum": ["Equal", "Exists"] },
+          "value": { "type": "string" },
+          "effect": { "enum": ["", "NoSchedule", "PreferNoSchedule", "NoExecute"] },
+          "tolerationSeconds": { "type": "integer", "minimum": 0 }
+        }
+      }
+    }
+  },
+  "definitions": {
+    "absolutePathMap": {
+      "type": "object",
+      "propertyNames": { "pattern": "^[a-z0-9][a-z0-9._-]{0,62}$" },
+      "additionalProperties": { "type": "string", "pattern": "^/.+" }
+    }
+  }
+}
