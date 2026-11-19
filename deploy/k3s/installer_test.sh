@@ -76,7 +76,13 @@ test ! -e "$HOST_ROOT/opt/permabox-k3s/owner"
 test ! -e "$READY_FILE"
 test ! -e "$tmp/restarts"
 cmp "$tmp/original" "$templates/config-v3.toml.tmpl"
+chmod 0755 "$HOST_ROOT/opt/permabox-k3s"
 reconcile
+mode_bits=$(stat -c %a "$HOST_ROOT/opt/permabox-k3s")
+if [[ $mode_bits != 700 ]]; then
+  printf 'expected private workload socket directory, got %s\n' "$mode_bits" >&2
+  exit 1
+fi
 grep -Fq '# custom setting' "$templates/config-v3.toml.tmpl"
 grep -Fq 'plugins."io.containerd.cri.v1.runtime"' "$templates/config-v3.toml.tmpl"
 test -x "$HOST_ROOT/opt/permabox-k3s/runtime"

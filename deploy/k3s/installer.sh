@@ -181,6 +181,7 @@ reconcile() (
   fi
   if [[ $mode == remove && ! -f $install_host/owner ]]; then touch "$ready"; return; fi
   if [[ $mode == remove ]] && active_records; then fail 'stop all PermaBox workloads before removing the runtime'; return 1; fi
+  if [[ $mode == install ]]; then chmod 0700 "$install_host" || return 1; fi
   select_unit || return 1
 
   version=$(sed -nE 's/^[[:space:]]*version[[:space:]]*=[[:space:]]*([23])[[:space:]]*(#.*)?$/\1/p' "$dir/config.toml")
