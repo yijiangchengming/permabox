@@ -7,6 +7,7 @@ export LC_ALL=C
 
 storage=${1:?pass storage root}
 marker=permabox-deployment-smoke-data
+restart_marker=/permabox-smoke-restart
 
 k() { k3s kubectl --request-timeout=10s "$@"; }
 app() { k -n "$namespace" "$@"; }
@@ -55,7 +56,16 @@ $scale_annotation
       containers:
         - name: demo
           image: docker.io/library/alpine:3.22
-          command: ["/bin/sleep", "86400"]
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              while :; do
+                if [ -e "$restart_marker" ]; then
+                  rm "$restart_marker"
+                  exit 0
+                fi
+                sleep 1
+              done
           securityContext:
             runAsUser: 0
             allowPrivilegeEscalation: false
@@ -76,8 +86,13 @@ replacement_ready() {
   ready_pods reuse 3 && jq -e --arg uid "$1" 'all(.items[]; .metadata.uid != $uid)' <<< "$pods" >/dev/null
 }
 
-# Wait for the node-side container removal as well as the Pod API deletion
-# before trying to reuse slots. Check exited containers too.
+pod_restarted() {
+  app get pod "$1" -o json | jq -e --arg uid "$2" --argjson restarts "$3" '
+    .metadata.uid == $uid and any(.status.containerStatuses[]?;
+      .name == "demo" and .ready and .restartCount > $restarts)' >/dev/null
+}
+
+# Wait for node-side removal before trying to reuse slots, including exited containers.
 containers_removed() {
   sudo k3s crictl --runtime-endpoint unix:///run/k3s/containerd/containerd.sock \
     ps -a -o json | jq -e --arg ns "$namespace" '
@@ -155,6 +170,14 @@ initial=$(read_markers)
 assert_own_markers "$initial"
 assert_host_markers 3
 
+echo 'Checking that a container restart in the same Pod preserves its data'
+read -r restarting restart_uid <<< "$(pod_rows)"
+restart_count=$(app get pod "$restarting" -o jsonpath='{.status.containerStatuses[0].restartCount}')
+app exec "$restarting" -c demo -- touch "$restart_marker"
+wait_for pod_restarted "$restarting" "$restart_uid" "$restart_count"
+wait_for ready_pods reuse 3
+[[ $(read_markers) == "$initial" ]] || fail 'Container restart lost or changed a replica marker'
+
 echo 'Checking controlled replacement of all three replicas'
 app scale deployment reuse --replicas=0
 wait_for ready_pods reuse 0
@@ -204,8 +227,22 @@ if [[ $replacement_value != - ]] && grep -Fxq -- "$replacement_value" < <(cut -d
   fail "The replacement shares a survivor's marker: $after_delete"
 fi
 
-echo 'Checking workload deletion GC'
 assert_host_markers 3
+echo 'Checking that a different image starts with fresh layers during a rolling update'
+old_image_ids=$(jq -r '.items[].status.containerStatuses[0].imageID' <<< "$pods" | sort -u)
+app set image deployment/reuse demo=docker.io/library/alpine:3.21
+k3s kubectl -n "$namespace" rollout status deployment/reuse --timeout=180s
+wait_for ready_pods reuse 3
+new_image_ids=$(jq -r '.items[].status.containerStatuses[0].imageID' <<< "$pods" | sort -u)
+[[ -n $old_image_ids && -n $new_image_ids && $old_image_ids != "$new_image_ids" ]] ||
+  fail 'Expected the rolling update to change the actual image IDs'
+rolled=$(read_markers)
+awk 'NF != 2 || $2 != "-" { bad = 1 } END { exit (bad || NR != 3) }' <<< "$rolled" ||
+  fail "The rolled replicas must start with fresh layers: $rolled"
+# Superseding the old ReplicaSet does not count as deleting or scaling the Deployment to zero.
+assert_host_markers 3
+
+echo 'Checking workload deletion GC'
 app delete deployment reuse --cascade=foreground --wait=false
 wait_for ready_pods reuse 0
 wait_for markers_gone
@@ -227,6 +264,29 @@ awk 'NF != 2 || $2 != "-" { bad = 1 } END { exit (bad || NR != 3) }' <<< "$fresh
   fail "Scaling back up recovered previously reclaimed markers: $fresh"
 app delete deployment zero-gc --cascade=foreground --wait=false
 wait_for ready_pods zero-gc 0
+wait_for containers_removed
+
+echo 'Checking that a same-name Deployment never inherits the old UID layers'
+create_deployment reuse false
+wait_for ready_pods reuse 3
+app patch deployment reuse --type=merge -p '{"spec":{"template":{"metadata":{"annotations":{"permabox.io/gc-on-workload-delete":"false"}}}}}'
+k3s kubectl -n "$namespace" rollout status deployment/reuse --timeout=180s
+wait_for ready_pods reuse 3
+write_markers fresh
+old_deployment_uid=$(app get deployment reuse -o jsonpath='{.metadata.uid}')
+app delete deployment reuse --cascade=foreground --wait=false
+k3s kubectl -n "$namespace" wait --for=delete deployment/reuse --timeout=120s
+wait_for ready_pods reuse 0
+wait_for containers_removed
+assert_host_markers 3
+create_deployment reuse false
+wait_for ready_pods reuse 3
+[[ $(app get deployment reuse -o jsonpath='{.metadata.uid}') != "$old_deployment_uid" ]]
+fresh=$(read_markers)
+awk 'NF != 2 || $2 != "-" { bad = 1 } END { exit (bad || NR != 3) }' <<< "$fresh" ||
+  fail "The recreated Deployment read the old deployment's layers: $fresh"
+app delete deployment reuse --cascade=foreground --wait=false
+wait_for ready_pods reuse 0
 wait_for containers_removed
 k delete namespace "$namespace" --wait=false
 echo 'Deployment reuse and workload GC checks passed'
