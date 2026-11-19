@@ -27,6 +27,10 @@ fake_info() {
 }
 cri_info() { fake_info; }
 host_exec() {
+  if [[ $1 == /usr/bin/test && -n ${service_exe:-} ]]; then
+    [[ $2 == "$service_exe" && $3 == -ef && $4 == /proc/123/exe ]]
+    return
+  fi
   if [[ $* == '/opt/permabox-k3s/runtime gc' ]]; then
     test -f "$READY_FILE" || exit 1
     printf '%s\n' gc >>"$tmp/sweeps"
@@ -36,6 +40,17 @@ host_exec() {
 }
 service_cmd() { printf '%s\n' 123; }
 export K3S_SERVICE=k3s.service
+
+(
+  unit=k3s.service k3s_bin=/usr/local/bin/k3s data_dir=/data
+  service_exe="$k3s_bin" select_unit
+  service_exe="$data_dir/data/current/bin/k3s" select_unit
+  if service_exe=/usr/local/bin/unrelated select_unit 2>/dev/null; then
+    printf '%s\n' 'accepted a service whose process was not K3s' >&2
+    exit 1
+  fi
+)
+
 restart_service() {
   printf '%s\n' restarted >>"$tmp/restarts"
   if [[ ${fail_restart:-0} == 1 ]]; then return 1; fi

@@ -42,9 +42,13 @@ select_unit() {
     *) [[ $unit =~ ^[A-Za-z0-9_.@-]+\.service$ && $unit != -* ]] || { fail 'invalid K3S_SERVICE'; return 1; } ;;
   esac
   local pid
-  if ! pid=$(service_cmd show --property=MainPID --value "$unit") || [[ ! $pid =~ ^[1-9][0-9]*$ ]] ||
-    ! host_exec /usr/bin/test "$k3s_bin" -ef "/proc/$pid/exe"; then
-    fail "service $unit does not run $k3s_bin"; return 1
+  if ! pid=$(service_cmd show --property=MainPID --value "$unit") || [[ ! $pid =~ ^[1-9][0-9]*$ ]]; then
+    fail "service $unit has no active main process"; return 1
+  fi
+  # The stock K3s launcher can exec the bundled server or agent in place.
+  if ! host_exec /usr/bin/test "$k3s_bin" -ef "/proc/$pid/exe" &&
+    ! host_exec /usr/bin/test "$data_dir/data/current/bin/k3s" -ef "/proc/$pid/exe"; then
+    fail "service $unit does not run $k3s_bin or the bundled K3s binary"; return 1
   fi
 }
 
