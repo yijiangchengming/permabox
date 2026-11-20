@@ -95,6 +95,46 @@ func TestManagedStartCommitsOwnershipOnlyAfterSuccess(t *testing.T) {
 		}
 	}
 }
+func TestCreateRequiresTrustedNamespace(t *testing.T) {
+	for _, tc := range []struct {
+		name, trusted, persist, kind string
+		deny                         bool
+	}{
+		{name: "default denies", persist: "true", deny: true},
+		{name: "prefix does not match", trusted: "[team]", persist: "true", deny: true},
+		{name: "suffix does not match", trusted: "[team-10]", persist: "true", deny: true},
+		{name: "nonpersistent passes through", persist: "false"},
+		{name: "sandbox passes through", persist: "true", kind: "sandbox"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := privateStateDir(t)
+			bundle := filepath.Join(base, "bundle")
+			if err := os.Mkdir(bundle, 0700); err != nil {
+				t.Fatal(err)
+			}
+			spec := fmt.Sprintf(`{"root":{"path":"rootfs"},"annotations":{"io.kubernetes.cri.sandbox-namespace":"team-1","io.kubernetes.cri.sandbox-name":"app-0","io.kubernetes.cri.sandbox-uid":"pod-uid","io.kubernetes.cri.container-type":%q,"permabox.io/persist":%q}}`, tc.kind, tc.persist)
+			if err := os.WriteFile(filepath.Join(bundle, "config.json"), []byte(spec), 0600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("TEST_TRUSTED_NAMESPACES", tc.trusted)
+			t.Setenv("TEST_REPORT_STDERR", "1")
+			out, stderr, code := call(t, base, "23", "create", "--bundle", bundle, "id")
+			if tc.deny {
+				if code != 1 || out != "" || !strings.Contains(stderr, `namespace "team-1" is not trusted`) {
+					t.Fatalf("denied create: stdout=%q stderr=%q status=%d", out, stderr, code)
+				}
+				for _, path := range []string{"id.runtime", "store"} {
+					if _, err := os.Stat(filepath.Join(base, path)); !os.IsNotExist(err) {
+						t.Fatalf("unauthorized create touched %s: %v", path, err)
+					}
+				}
+			} else if code != 23 || out != "create\n--bundle\n"+bundle+"\nid\nforwarded\n" || stderr != "runtime stderr\n" {
+				t.Fatalf("passthrough: stdout=%q stderr=%q status=%d", out, stderr, code)
+			}
+		})
+	}
+}
+
 func TestCreateRequiresAvailableWorkloadIdentity(t *testing.T) {
 	base := privateStateDir(t)
 	bundle := filepath.Join(base, "bundle")
@@ -113,6 +153,7 @@ func TestCreateRequiresAvailableWorkloadIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("TEST_REPORT_STDERR", "1")
+	t.Setenv("TEST_TRUSTED_NAMESPACES", "[default]")
 	out, stderr, code := call(t, base, "0", "create", "--bundle", bundle, "id")
 	if code != 1 || out != "" || !strings.Contains(stderr, "unavailable.sock") {
 		t.Fatalf("unverified create: stdout=%q stderr=%q status=%d", out, stderr, code)
@@ -263,6 +304,20 @@ func TestWrapperHelper(t *testing.T) {
 		}
 	}
 	cfg := config.Config{StorageRoot: filepath.Join(base, "store"), Runtime: filepath.Join(base, "fake-runtime"), Annotation: "permabox.io/persist"}
+	if namespaces := os.Getenv("TEST_TRUSTED_NAMESPACES"); namespaces != "" {
+		path := filepath.Join(base, "test-config.yaml")
+		if err := os.WriteFile(path, []byte("trusted_namespaces: "+namespaces+"\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("PERMABOX_CONFIG", path)
+		loaded, err := config.Load()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		loaded.StorageRoot, loaded.Runtime, loaded.Annotation = cfg.StorageRoot, cfg.Runtime, cfg.Annotation
+		cfg = loaded
+	}
 	cfg.UnderlyingRuntimes = map[string]string{"alternate": filepath.Join(base, "alternate")}
 	changed := filepath.Join(base, "changed-default")
 	if _, err := os.Stat(changed); err == nil {

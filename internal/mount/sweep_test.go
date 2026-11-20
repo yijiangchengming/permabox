@@ -38,6 +38,9 @@ func TestSweepWorkloadProtectsReusedAndUntrackedSlots(t *testing.T) {
 	if _, err := m.PrepareOwned("second", root, slot, "app", owner); err != nil {
 		t.Fatal(err)
 	}
+	if err := m.ActivateOwnership("second"); err != nil {
+		t.Fatal(err)
+	}
 	if err := m.Cleanup("second"); err != nil {
 		t.Fatal(err)
 	}
@@ -88,9 +91,127 @@ func TestFailedCreatePreservesOwner(t *testing.T) {
 		t.Fatal(err)
 	}
 	candidates, err := m.DiscoverReleased(roots, "", 0, time.Now())
-	if err != nil || len(candidates) != 1 || candidates[0].Owner() != owner {
+	if err != nil || len(candidates) != 0 {
 		t.Fatalf("discover after failed create = %+v, %v", candidates, err)
 	}
+}
+
+func TestRecoverConfirmedUseAfterReboot(t *testing.T) {
+	for _, confirmed := range []bool{false, true} {
+		m, sys, root, slot := fixture(t)
+		roots := []string{filepath.Dir(filepath.Dir(slot))}
+		owner := ownership.Owner{Namespace: "namespace", Kind: "StatefulSet", Name: "app", UID: "original"}
+		if _, err := m.PrepareOwned("id", root, slot, "app", owner); err != nil {
+			t.Fatal(err)
+		}
+		if confirmed {
+			if err := m.ActivateOwnership("id"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.RemoveAll(m.Dir); err != nil {
+			t.Fatal(err)
+		}
+		sys.table = nil
+		now := time.Now()
+		got, err := m.DiscoverReleased(roots, "", 0, now)
+		if err != nil || len(got) != 0 {
+			t.Fatalf("without boot change: %v, %v", got, err)
+		}
+		var use slotUse
+		path := filepath.Join(slot, useMarker)
+		if !readMarker(path, &use) {
+			t.Fatal("missing persistent use")
+		}
+		use.Boot = "old-boot"
+		if err := writeRecord(path, use); err != nil {
+			t.Fatal(err)
+		}
+		got, err = m.DiscoverReleased(roots, "", 0, now)
+		if err != nil || (len(got) == 1) != confirmed {
+			t.Fatalf("after reboot (confirmed=%v): %v, %v", confirmed, got, err)
+		}
+		if err := m.Sweep(roots, time.Hour, now.Add(2*time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+		_, err = os.Stat(slot)
+		if (err == nil) == confirmed {
+			t.Fatalf("after TTL (confirmed=%v): %v", confirmed, err)
+		}
+	}
+}
+
+func TestScaleDownGraceProtectsReuse(t *testing.T) {
+	m, _, root, slot := fixture(t)
+	roots := []string{filepath.Dir(filepath.Dir(slot))}
+	owner := ownership.Owner{Namespace: "namespace", Kind: "StatefulSet", Name: "app", UID: "original"}
+	for _, id := range []string{"first", "replacement"} {
+		if _, err := m.PrepareOwned(id, root, slot, "app", owner); err != nil {
+			t.Fatal(err)
+		}
+		if err := m.ActivateOwnership(id); err != nil {
+			t.Fatal(err)
+		}
+		if err := m.Cleanup(id); err != nil {
+			t.Fatal(err)
+		}
+		now := time.Now()
+		got, err := m.DiscoverReleased(roots, "", 0, now)
+		if err != nil || len(got) != 1 {
+			t.Fatalf("discover: %v, %v", got, err)
+		}
+		if err := m.StageScaledDown(roots, "", now, got, 1); err != nil {
+			t.Fatal(err)
+		}
+		if err := m.StageScaledDown(roots, "", now.Add(scaleDownGrace-time.Second), got, 1); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(slot); err != nil {
+			t.Fatal(err)
+		}
+		if id == "replacement" {
+			if err := m.StageScaledDown(roots, "", now.Add(scaleDownGrace), got, 2); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(slot); err != nil {
+				t.Fatal("generation change must restart the grace period", err)
+			}
+			if err := m.StageScaledDown(roots, "", now.Add(2*scaleDownGrace), got, 2); err != nil {
+				t.Fatal(err)
+			}
+			assertMissing(t, slot)
+		}
+	}
+}
+
+func TestSweepResumesPartiallyDeletedRetirement(t *testing.T) {
+	m, _, _, slot := fixture(t)
+	store := filepath.Dir(filepath.Dir(slot))
+	now := time.Now()
+	prepareReleasedSlot(t, slot, now.Add(-2*time.Hour))
+	parked, err := retireSlot(slot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, marker := range []string{"container.json", releasedMarker} {
+		if err := os.Remove(filepath.Join(parked, marker)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	unknown := filepath.Join(filepath.Dir(slot), retiredPrefix+"unknown")
+	mkdir(t, unknown)
+	put(t, unknown, "payload", "keep")
+	orphan := filepath.Join(filepath.Dir(slot), retiredPrefix+"orphan"+receiptSuffix)
+	if err := writeRecord(orphan, retirementReceipt{Inode: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Sweep([]string{store}, 0, now); err != nil {
+		t.Fatal(err)
+	}
+	assertMissing(t, orphan)
+	assertMissing(t, parked)
+	assertMissing(t, parked+".receipt")
+	check(t, unknown, "payload", "keep")
 }
 
 func TestSweepRetriesTerminalJournal(t *testing.T) {

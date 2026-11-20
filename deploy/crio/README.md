@@ -25,6 +25,8 @@ CRI-O's default `overlay` driver is unsupported. `StopContainer` asks `container
 
 Before deploying a persistent workload, create `/opt/permabox` with owner `root` and mode `0700` on the node. Label it `permabox.io.node-restriction.kubernetes.io/crio-gc=true`, apply [the metadata bridge](../kubernetes/workload-bridge.yaml), and wait for its DaemonSet to be ready. The socket path in the example config is `/opt/permabox/workload.sock`. This bridge is required even with GC disabled.
 
+To run the example, set `trusted_namespaces: [permabox-demo]` in the node config before creating the StatefulSet.
+
 ```sh
 (
   set -eu

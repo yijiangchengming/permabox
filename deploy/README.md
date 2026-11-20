@@ -23,6 +23,8 @@ sudo test -x /usr/bin/runc
 
 See [config.yaml](config.yaml) for the defaults. If the node's `runc` is elsewhere, set `underlying_runtime` to its absolute path. It must not point back to PermaBox. Test any other underlying runtime on the target node before using it. PermaBox tracks mounts and cleanup in `/run/permabox` and keeps persistent data separately in `<storage_root>/<namespace>/<pod-name>/upper`. The host log defaults to `/var/log/permabox.log`.
 
+Set `trusted_namespaces: [permabox-demo]` in the installed config to run the example. The default empty list denies persistence; regular runtime passthrough still works. Only list namespaces whose Pod creators you trust with every writable layer in that namespace. StatefulSet UID verification does not isolate users who can create Pods in the same namespace. Set the allowlist explicitly when upgrading.
+
 | Environment variable | Purpose |
 | --- | --- |
 | `PERMABOX_CONFIG` | Config file path; defaults to `/etc/permabox/config.yaml` |
@@ -151,7 +153,9 @@ If verification fails, first run `kubectl -n permabox-demo describe pod permabox
 
 The default `gc_idle_ttl: "0s"` retains released data. Periodic GC still retries stale cleanup when it can confirm that doing so is safe. With a positive Go duration such as `"72h"`, the idle period starts when the writable layer was last confirmed released. After the period elapses, a subsequent eligible GC sweep can delete the data. Before expiry, a replacement on the same node with the same storage root, namespace, and Pod name can restore the layer. GC keeps legacy data without a lifecycle marker until a later successful use and release. It skips active, potentially mounted, or uncertain data and records. Shared storage is unsupported.
 
-Reclaiming data when a StatefulSet is deleted or scaled to zero is off by default. When enabled, the next eligible periodic sweep can reclaim released layers without waiting for the idle TTL. For manual deployment, the local metadata bridge is required even with both policies off. Set `workload_socket` to its absolute host path. Its ServiceAccount needs only `get` access to Pods and StatefulSets, and its socket directory must be private (`0700`). The [K3s Helm installer](k3s/README.md) sets it up automatically.
+Reclaiming data when a StatefulSet is deleted or scaled to zero is off by default. Deletion can reclaim a released layer on the next eligible sweep. Scale-to-zero requires a later sweep with fresh confirmation, at least one minute after the first approval; reuse cancels the pending reclamation. The final API check and the node's disk operation cannot be atomic. Idle TTL is a separate policy. For manual deployment, the local metadata bridge is required even with both workload policies off. Set `workload_socket` to its absolute host path. Its ServiceAccount needs only `get` access to Pods and StatefulSets, and its socket directory must be private (`0700`). The [K3s Helm installer](k3s/README.md) sets it up automatically.
+
+After a node reboot, GC can release a layer whose latest start was confirmed if no journal or mount references it. Loss of the journal alone does not prove release. GC keeps layers whose latest start was not confirmed and retries interrupted deletions using a receipt outside the deleted directory.
 
 The same API bridge also supports overrides from Pod template annotations. Set `gc_workload_annotations: true` on the node and use the [same annotations as the Helm deployment](k3s/README.md#override-gc-per-workload).
 

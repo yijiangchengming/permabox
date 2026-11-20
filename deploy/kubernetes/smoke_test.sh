@@ -70,6 +70,7 @@ runtime_bin=$(node_exec sh -c 'command -v "$1"' sh "$runtime")
 node_exec "$runtime_bin" --version
 docker exec -i "$node" tee /etc/permabox/config.yaml >/dev/null <<EOF
 underlying_runtime: $runtime_bin
+trusted_namespaces: ["$ns"]
 gc_on_workload_delete: true
 gc_on_scale_to_zero: true
 gc_workload_annotations: true

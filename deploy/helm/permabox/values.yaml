@@ -14,6 +14,8 @@ k3s:
   bin: /usr/local/bin/k3s
 
 storageRoot: /var/lib/permabox/storage
+# Exact Kubernetes namespace names allowed to use persistence. Empty denies persistence.
+trustedNamespaces: []
 # Empty selects runc from the K3s data/current/bin directory.
 underlyingRuntime: ""
 # Aliases for the fixed Pod annotations; values are absolute host paths.

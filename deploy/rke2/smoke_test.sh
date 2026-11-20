@@ -52,6 +52,7 @@ node_exec install -m 0755 bin/permabox /usr/local/bin/permabox
 } | node_exec tee "$agent/etc/containerd/config-v3.toml.tmpl" >/dev/null
 node_exec tee /etc/permabox/config.yaml >/dev/null <<EOF
 underlying_runtime: $runtime
+trusted_namespaces: ["$ns"]
 gc_on_workload_delete: true
 gc_on_scale_to_zero: true
 gc_workload_annotations: true

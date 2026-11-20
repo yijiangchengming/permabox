@@ -23,6 +23,8 @@ sudo test -x /usr/bin/runc
 
 默认值见 [config.yaml](config.yaml)。若节点上的 `runc` 不在 `/usr/bin/runc`，修改 `underlying_runtime` 为其绝对路径，不能指回 PermaBox。其他底层运行时应先在目标节点验证兼容性。运行时状态固定在 `/run/permabox`，用于跟踪和清理挂载；持久化数据保存在 `<storage_root>/<namespace>/<pod-name>/upper`，不在 `/run` 下。调试日志默认写入宿主机 `/var/log/permabox.log`。
 
+运行示例前，在节点配置中设置 `trusted_namespaces: [permabox-demo]`。默认空名单拒绝持久化，普通运行时透传仍可使用。仅当你信任命名空间内所有 Pod 创建者访问该命名空间的全部写层时，才将其加入名单。核验 StatefulSet UID 无法隔离同一命名空间内有权创建 Pod 的用户。升级时请显式配置名单。
+
 | 环境变量 | 用途 |
 | --- | --- |
 | `PERMABOX_CONFIG` | 配置文件路径，默认 `/etc/permabox/config.yaml` |
@@ -149,7 +151,9 @@ sudo crictl info
 
 默认 `gc_idle_ttl: "0s"` 保留已释放的持久化数据，周期 GC 仍会重试能够安全确认的残留清理。若设为正的 Go 时长（如 `"72h"`），从最后一次确认写层已释放时开始计算空闲时间；达到时长后，下一次符合条件的 GC 才会删除数据。在到期前，同一节点、同一存储根、同一命名空间和 Pod 名的替换实例仍可恢复原写层。GC 会保留没有生命周期标记的旧数据，直到后续成功使用并释放；对仍活跃、可能仍挂载或状态无法确认的记录和数据会保守跳过。共享存储不受支持。
 
-StatefulSet 删除与缩到 0 的回收默认关闭。开启后，下一轮符合条件的周期回收即可清理已释放的写层，无需等待空闲 TTL。手动部署即使关闭回收也需要元数据桥接来核验身份。将 `workload_socket` 设为桥接 socket 的宿主机绝对路径，目录权限设为 `0700`；桥接的 ServiceAccount 只需要 Pod 和 StatefulSet 的 `get` 权限。[K3s Helm 安装器](k3s/README-cn.md)会自动部署桥接。
+StatefulSet 删除和缩到 0 的回收默认关闭。开启后，删除可在下一次符合条件的扫描回收已释放写层；缩到 0 则至少要等首次批准一分钟，并在后续扫描中重新确认，期间写层复用会取消待回收状态。最终 API 检查和节点磁盘操作无法原子执行。空闲 TTL 是独立策略。手动部署即使关闭回收也需要元数据桥接来核验身份。将 `workload_socket` 设为桥接 socket 的宿主机绝对路径，目录权限设为 `0700`；桥接的 ServiceAccount 只需要 Pod 和 StatefulSet 的 `get` 权限。[K3s Helm 安装器](k3s/README-cn.md)会自动部署桥接。
+
+节点重启后，若写层最近一次启动已确认，且无日志或挂载引用，GC 可以恢复释放记录。仅丢失运行时日志不足以认定写层已释放。最近一次启动未确认的写层会保留；中断的删除可用写层目录之外的凭据继续清理。
 
 同一个 API 桥也支持 Pod 模板注解覆盖，节点设置 `gc_workload_annotations: true` 即可启用；[注解示例](k3s/README-cn.md#按工作负载覆盖回收策略)与 Helm 部署相同。
 

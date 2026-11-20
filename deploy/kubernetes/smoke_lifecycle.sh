@@ -21,6 +21,7 @@ stopped() { local current; current=$(uid) && [[ -z $current ]]; }
 removed() { node_exec test ! -e "$slot"; }
 gc() { node_exec /usr/local/bin/permabox gc; }
 gc_removed() { gc && removed; }
+gc_staged() { gc && node_exec test -f "$slot/.permabox-scale-down.json"; }
 
 smoke_lifecycle() {
   local slot=/var/lib/permabox/storage/$ns/$pod original
@@ -68,6 +69,14 @@ smoke_lifecycle() {
   wait_for new_pod ''
   ready
   node_exec test -f "$slot/upper/etc/permabox-marker"
+  app scale statefulset permabox-demo --replicas=0
+  wait_for stopped
+  wait_for gc_staged
+  app scale statefulset permabox-demo --replicas=1
+  wait_for new_pod ''
+  ready
+  node_exec test ! -e "$slot/.permabox-scale-down.json"
+  app exec "$pod" -c demo -- grep -Fxq persisted /etc/permabox-marker
   app scale statefulset permabox-demo --replicas=0
   wait_for stopped
   wait_for gc_removed

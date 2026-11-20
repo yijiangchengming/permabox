@@ -91,8 +91,9 @@ node_exec tee /etc/cni/net.d/10-permabox.conflist >/dev/null <<'EOF'
   ]
 }
 EOF
-node_exec tee /etc/permabox/config.yaml >/dev/null <<'EOF'
+node_exec tee /etc/permabox/config.yaml >/dev/null <<EOF
 underlying_runtime: /usr/libexec/crio/runc
+trusted_namespaces: ["$ns"]
 gc_on_workload_delete: true
 gc_on_scale_to_zero: true
 gc_workload_annotations: true

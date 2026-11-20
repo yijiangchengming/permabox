@@ -37,6 +37,7 @@ helm upgrade --install permabox ./deploy/helm/permabox \
   --set-string image.repository="$IMAGE_REPO" \
   --set-string image.tag="$IMAGE_TAG" \
   --set-string 'nodeSelector.kubernetes\.io/hostname'="$NODE_HOSTNAME" \
+  --set 'trustedNamespaces={permabox-demo}' \
   --wait --timeout 10m
 
 kubectl -n permabox-system rollout status daemonset/permabox-installer --timeout=5m
@@ -58,6 +59,7 @@ The chart applies the same `nodeSelector` and `tolerations` to the installer and
 | `underlyingRuntime` | Uses the `runc` bundled with K3s at `<dataDir>/data/current/bin/runc`. |
 | `storageRoot` | `/var/lib/permabox/storage` |
 | `storageRoots` | `{}`. Maps storage aliases to absolute paths on the node. |
+| `trustedNamespaces` | `[]`. Explicit list of namespaces allowed to use persistence. Add your workload namespaces, including when upgrading. |
 | `underlyingRuntimes` | `{}`. Maps runtime aliases to absolute binary paths on the host. |
 | `gcIdleTTL` | `"0s"`. A Go duration; by default, GC retains released data and still retries stale cleanup. |
 | `gcOnWorkloadDelete` | `false`. Enable to reclaim safely released writable layers when their StatefulSet is deleted. |
@@ -70,13 +72,15 @@ Use `permabox.io/storage-root` to set a storage alias for the container selected
 
 The installer runs `permabox validate-config` on the staged configuration before publishing it. The default runtime and any runtime alias must not point to `/opt/permabox-k3s/runtime`, because that would call PermaBox recursively.
 
+The installer requires a healthy metadata bridge and checks existing writable layers for verifiable StatefulSet identity before publishing the upgrade. Resolve any legacy layer errors before retrying. A failed CRI handler transition restores the previous transaction state; allow time for K3s to restart and the previous handler to become ready.
+
 ## Workload garbage collection
 
 Workload GC policies apply only to StatefulSets. Enable either policy independently, for example with `--set gcOnWorkloadDelete=true --set gcOnScaleToZero=true`. Released layers are checked by the next periodic sweep (60 seconds by default, configurable with `gcIntervalSeconds`). Both policies can reclaim data without waiting for `gcIdleTTL`. Helm also runs a read-only metadata bridge for StatefulSet UID verification, even when GC policies are disabled. Review the [legacy layer upgrade guidance](../README.md#3-pin-the-example-to-one-node-and-deploy-it) before upgrading.
 
 Layers left by Deployments from earlier versions can still be reclaimed through `gcIdleTTL` once released.
 
-Deleting a Pod by hand, rolling out an update, or scaling to a nonzero replica count does not by itself trigger either policy. After scaling to zero, leave replicas at zero until the writable layer is released and GC checks it. If you scale back up quickly, GC may not observe the brief zero count. The policies apply only to writable layers whose workload ownership was successfully recorded with the feature enabled and whose containers reached startup. See [periodic garbage collection](../README.md#periodic-garbage-collection) for the safeguards.
+Deleting a Pod by hand, rolling out an update, or scaling to a nonzero replica count does not by itself trigger either policy. Deletion is eligible on the next sweep; scaling to zero requires a second sweep at least one minute after approval. The policies apply only to released writable layers with confirmed ownership. See [periodic garbage collection](../README.md#periodic-garbage-collection) for the safeguards.
 
 ### Override GC per workload
 

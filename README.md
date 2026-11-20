@@ -26,6 +26,8 @@ See the [Kubernetes compatibility matrix](deploy/kubernetes/README.md) for teste
 
 After installing the `permabox` RuntimeClass, set `spec.runtimeClassName: permabox` and `permabox.io/persist: "true"` on the Pod. In a multi-container Pod, use `permabox.io/container` to select the container whose root filesystem should persist. See the [StatefulSet example](deploy/statefulset.yaml).
 
+Add the workload namespace to Helm `trustedNamespaces` or node config `trusted_namespaces` before enabling persistence. Only list namespaces where everyone authorized to create Pods is trusted.
+
 Keep the workload on the node holding its data and use a compatible local filesystem. NFS and shared writable layers are unsupported. Test your kernel, containerd snapshotter, and underlying runtime together before production deployment. Review the [security and upgrade guidance](deploy/README.md) before reusing a writable layer with a different image.
 
 ## Develop

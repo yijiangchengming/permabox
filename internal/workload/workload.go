@@ -54,6 +54,7 @@ type object struct {
 		UID               string            `json:"uid"`
 		References        []reference       `json:"ownerReferences,omitempty"`
 		DeletionTimestamp *time.Time        `json:"deletionTimestamp,omitempty"`
+		Generation        int64             `json:"generation,omitempty"`
 		Annotations       map[string]string `json:"annotations,omitempty"`
 	} `json:"metadata"`
 	Spec struct {
@@ -160,19 +161,35 @@ func (c Client) Resolve(ctx context.Context, namespace, pod, uid string) (owners
 		Overrides: readOverrides(obj.Metadata.Annotations)}, nil
 }
 
-func (c Client) Reclaim(ctx context.Context, owner ownership.Owner, onDelete, onZero bool) (bool, error) {
+type ReclaimReason uint8
+
+const (
+	ReclaimNone ReclaimReason = iota
+	ReclaimZero
+	ReclaimDeleted
+)
+
+// Reclaim observes a single StatefulSet. Only a scale-to-zero decision carries
+// a generation, so another spec change invalidates its previously staged grace.
+func (c Client) Reclaim(ctx context.Context, owner ownership.Owner, onDelete, onZero bool) (ReclaimReason, int64, error) {
 	if !(onDelete || onZero) || !owner.Valid() {
-		return false, nil
+		return ReclaimNone, 0, nil
 	}
 	obj, err := c.get(ctx, owner.Kind, owner.Namespace, owner.Name)
-	if errors.Is(err, errNotFound) {
-		return onDelete, nil
+	if err != nil && !errors.Is(err, errNotFound) {
+		return ReclaimNone, 0, err
 	}
-	if err != nil {
-		return false, err
+	if errors.Is(err, errNotFound) || obj.Metadata.UID != owner.UID || (obj.Metadata.DeletionTimestamp != nil && !obj.Metadata.DeletionTimestamp.IsZero()) {
+		if onDelete {
+			return ReclaimDeleted, 0, nil
+		}
+		return ReclaimNone, 0, nil
 	}
-	if obj.Metadata.UID != owner.UID || (obj.Metadata.DeletionTimestamp != nil && !obj.Metadata.DeletionTimestamp.IsZero()) {
-		return onDelete, nil
+	if onZero && obj.Spec.Replicas != nil && *obj.Spec.Replicas == 0 {
+		if obj.Metadata.Generation <= 0 {
+			return ReclaimNone, 0, errors.New("scaled-down StatefulSet response has no valid generation")
+		}
+		return ReclaimZero, obj.Metadata.Generation, nil
 	}
-	return onZero && obj.Spec.Replicas != nil && *obj.Spec.Replicas == 0, nil
+	return ReclaimNone, 0, nil
 }

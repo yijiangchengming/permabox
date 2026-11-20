@@ -51,6 +51,10 @@ func Run(cfg config.Config, manager mount.Manager, args []string, report func(st
 				return 1
 			}
 		} else {
+			if bundle := options.Persistence; bundle != nil && !cfg.TrustsNamespace(bundle.Namespace) {
+				report("create %s: namespace %q is not trusted for persistence; check trusted_namespaces", inv.ID, bundle.Namespace)
+				return 1
+			}
 			if options.RuntimeAlias != "" {
 				var ok bool
 				runtime, ok = cfg.UnderlyingRuntimes[options.RuntimeAlias]
@@ -193,9 +197,7 @@ func collect(cfg config.Config, manager mount.Manager, routing routes, report fu
 	roots := cfg.AllStorageRoots()
 	var sweep error
 	if cfg.WorkloadGC() {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		sweep = sweepWorkloads(manager, roots, "", cfg.GCIdleTTL, now, workloadReclaimer(ctx, cfg))
+		sweep = sweepWorkloads(manager, roots, "", cfg.GCIdleTTL, now, workloadReclaimer(cfg))
 	} else {
 		sweep = manager.Sweep(roots, cfg.GCIdleTTL, now)
 	}
@@ -206,14 +208,24 @@ func collect(cfg config.Config, manager mount.Manager, routing routes, report fu
 	return 0
 }
 
-func workloadReclaimer(ctx context.Context, cfg config.Config) func(ownership.Owner) (bool, error) {
+func workloadReclaimer(cfg config.Config) reclaimer {
 	client := workloadClient(cfg)
-	return func(owner ownership.Owner) (bool, error) {
+	return func(ctx context.Context, owner ownership.Owner) (reclaimDecision, error) {
 		onDelete, onZero := cfg.GCOnWorkloadDelete, cfg.GCOnScaleToZero
 		if cfg.GCWorkloadAnnotations {
 			onDelete, onZero = workload.ApplyOverrides(owner.Overrides, onDelete, onZero)
 		}
-		return client.Reclaim(ctx, owner, onDelete, onZero)
+		reason, generation, err := client.Reclaim(ctx, owner, onDelete, onZero)
+		if err != nil {
+			return reclaimDecision{}, err
+		}
+		switch reason {
+		case workload.ReclaimDeleted:
+			return reclaimDecision{reason: mount.ReclaimDeleted}, nil
+		case workload.ReclaimZero:
+			return reclaimDecision{reason: mount.ReclaimZero, generation: generation}, nil
+		}
+		return reclaimDecision{}, nil
 	}
 }
 

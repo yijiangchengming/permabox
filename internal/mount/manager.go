@@ -150,6 +150,14 @@ func (m Manager) PrepareOwned(id, root, slot, container string, owner ownership.
 	if err := prepareSlot(slot, container, info); err != nil {
 		return false, err
 	}
+	if owner.Valid() {
+		if err := beginSlotUse(slot, id); err != nil {
+			return false, err
+		}
+	}
+	if err := removeDurable(filepath.Join(slot, scaleDownMarker)); err != nil {
+		return false, err
+	}
 	if err := removeDurable(filepath.Join(slot, releasedMarker)); err != nil {
 		return false, err
 	}
@@ -199,7 +207,7 @@ func (m Manager) commitOwnership(id string, state record) error {
 	if err := realDir(state.Slot); err != nil {
 		return err
 	}
-	if err := writeRecord(filepath.Join(state.Slot, workloadMarker), state.PendingOwner); err != nil {
+	if err := confirmSlotUse(state.Slot, id, *state.PendingOwner); err != nil {
 		return err
 	}
 	state.Started = false

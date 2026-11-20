@@ -37,6 +37,7 @@ helm upgrade --install permabox ./deploy/helm/permabox \
   --set-string image.repository="$IMAGE_REPO" \
   --set-string image.tag="$IMAGE_TAG" \
   --set-string 'nodeSelector.kubernetes\.io/hostname'="$NODE_HOSTNAME" \
+  --set 'trustedNamespaces={permabox-demo}' \
   --wait --timeout 10m
 
 kubectl -n permabox-system rollout status daemonset/permabox-installer --timeout=5m
@@ -56,6 +57,7 @@ Chart 将同一套 `nodeSelector` 和 `tolerations` 应用于安装器和 Runtim
 | `underlyingRuntime` | 使用 K3s 自带的 `<dataDir>/data/current/bin/runc` |
 | `storageRoot` | `/var/lib/permabox/storage` |
 | `storageRoots` | `{}`；存储别名到节点本地绝对路径的映射 |
+| `trustedNamespaces` | `[]`；显式允许使用持久化的命名空间，升级时也需要配置 |
 | `underlyingRuntimes` | `{}`；运行时别名到宿主机绝对二进制路径的映射 |
 | `gcIdleTTL` | `"0s"`；Go 时长，默认保留已释放的持久化数据，GC 仍重试残留清理 |
 | `gcOnWorkloadDelete` | `false`；设为 `true` 后，删除 StatefulSet 时回收其已安全释放的写层 |
@@ -68,11 +70,13 @@ Chart 将同一套 `nodeSelector` 和 `tolerations` 应用于安装器和 Runtim
 
 安装器通过 `permabox validate-config` 验证暂存的配置，验证成功后才发布。默认运行时和别名均不得指向安装器包装器 `/opt/permabox-k3s/runtime`，否则会递归调用 PermaBox。
 
+安装器会先确认元数据桥接可用，并检查现有写层是否有可核验的 StatefulSet 身份，再发布升级。若发现旧写层问题，请处理后重试。CRI handler 切换失败时会恢复事务记录的原状态；请预留时间让 K3s 重启并恢复原 handler。
+
 两项工作负载回收策略仅适用于 StatefulSet，可独立开启，例如 Helm 的 `--set gcOnWorkloadDelete=true --set gcOnScaleToZero=true`。已释放的写层由下一轮周期任务检查，默认间隔 60 秒，可通过 `gcIntervalSeconds` 调整。两项策略都无需等待 `gcIdleTTL`。即使关闭回收，Helm 也会启动只读元数据桥接以核验 StatefulSet UID。升级前请参考[旧写层迁移说明](../README-cn.md)。
 
 旧版本中由 Deployment 留下的写层，在释放后仍可通过 `gcIdleTTL` 回收。
 
-手动删除 Pod、滚动更新和缩容到非零副本数不会单独触发这两项策略。缩到 0 后，需保持零副本直到写层释放并通过回收检查；如果很快恢复副本，短暂的零副本状态可能未被观察到。只有启用后成功识别工作负载归属并进入启动阶段的容器写层才受这两项策略管理。回收保护规则见[定期回收](../README-cn.md#定期回收gc)。
+手动删除 Pod、滚动更新和缩容到非零副本数不会单独触发这两项策略。删除 StatefulSet 可在下一次符合条件的扫描回收；缩到 0 则需至少等待首次批准一分钟，并由后续扫描再次确认。两项策略只处理已释放且归属已确认的写层。回收保护规则见[定期回收](../README-cn.md#定期回收gc)。
 
 ### 按工作负载覆盖回收策略
 

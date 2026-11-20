@@ -52,6 +52,8 @@ spec:
               value: {{ .Values.k3s.bin | quote }}
             - name: STORAGE_ROOT
               value: {{ .Values.storageRoot | quote }}
+            - name: TRUSTED_NAMESPACES
+              value: {{ default (list) .Values.trustedNamespaces | toJson | quote }}
             - name: UNDERLYING_RUNTIME
               value: {{ .Values.underlyingRuntime | quote }}
             - name: STORAGE_ROOTS

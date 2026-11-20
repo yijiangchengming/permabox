@@ -72,8 +72,8 @@ func TestUnixBridgePreservesAuthoritativeNotFound(t *testing.T) {
 	defer server.Close()
 	go server.Serve(listener)
 	client := UnixClient(path)
-	if ok, err := client.Reclaim(context.Background(), ownership.Owner{Namespace: "test", Kind: "StatefulSet", Name: "app", UID: "old-uid"}, true, false); err != nil || !ok {
-		t.Fatalf("bridge reclaim = %v, %v", ok, err)
+	if reason, generation, err := client.Reclaim(context.Background(), ownership.Owner{Namespace: "test", Kind: "StatefulSet", Name: "app", UID: "old-uid"}, true, false); err != nil || reason != ReclaimDeleted || generation != 0 {
+		t.Fatalf("bridge reclaim = %v, %d, %v", reason, generation, err)
 	}
 	for _, path := range []string{
 		"/api/v1/namespaces/test/secrets/app",
@@ -136,7 +136,8 @@ func TestPolicyRequiresVerifiedWorkloadState(t *testing.T) {
 		{"deleted", `{"reason":"NotFound","details":{"name":"app"}}`, 404, true, true, false},
 		{"replacement", `{"metadata":{"uid":"other"},"spec":{"replicas":0}}`, 200, true, true, false},
 		{"deletion accepted with finalizer", `{"metadata":{"uid":"app-id","deletionTimestamp":"2026-11-19T12:00:00Z"},"spec":{"replicas":0}}`, 200, true, true, false},
-		{"zero", `{"metadata":{"uid":"app-id"},"spec":{"replicas":0}}`, 200, true, false, true},
+		{"zero", `{"metadata":{"uid":"app-id","generation":23},"spec":{"replicas":0}}`, 200, true, false, true},
+		{"zero without generation", `{"metadata":{"uid":"app-id"},"spec":{"replicas":0}}`, 200, false, false, false},
 		{"pod deleted or rolling update", `{"metadata":{"uid":"app-id"},"spec":{"replicas":1}}`, 200, false, false, false},
 		{"missing replicas", `{"metadata":{"uid":"app-id"}}`, 200, false, false, false},
 		{"missing UID", `{"spec":{"replicas":0}}`, 200, false, false, false},
@@ -152,11 +153,42 @@ func TestPolicyRequiresVerifiedWorkloadState(t *testing.T) {
 			c := Client{base: s.URL, http: s.Client()}
 			owner := ownership.Owner{Namespace: "test", Kind: "StatefulSet", Name: "app", UID: "app-id"}
 			for _, p := range []struct{ del, scale, want bool }{{true, true, tc.want}, {true, false, tc.deleteOnly}, {false, true, tc.scaleOnly}, {false, false, false}} {
-				got, _ := c.Reclaim(context.Background(), owner, p.del, p.scale)
-				if got != p.want {
-					t.Fatalf("delete=%v scale=%v: reclaim=%v; want %v", p.del, p.scale, got, p.want)
+				got, generation, err := c.Reclaim(context.Background(), owner, p.del, p.scale)
+				want, wantGeneration := ReclaimNone, int64(0)
+				if p.want {
+					want = ReclaimDeleted
+					if tc.name == "zero" {
+						want, wantGeneration = ReclaimZero, 23
+					}
+				}
+				if tc.name == "zero without generation" && p.scale && err == nil {
+					t.Fatal("expected missing generation to fail closed")
+				}
+				if got != want || generation != wantGeneration {
+					t.Fatalf("delete=%v scale=%v: reclaim=%v generation=%d; want %v, %d", p.del, p.scale, got, generation, want, wantGeneration)
 				}
 			}
 		})
+	}
+}
+
+func TestBridgeReclaimUsesSingleObservationWithGeneration(t *testing.T) {
+	requests := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		fmt.Fprint(w, `{"metadata":{"uid":"app-id","generation":42},"spec":{"replicas":0}}`)
+	}))
+	defer upstream.Close()
+	bridge := Client{base: upstream.URL, http: upstream.Client()}
+	server := httptest.NewServer(http.HandlerFunc(bridge.serveMetadata))
+	defer server.Close()
+	client := Client{base: server.URL, http: server.Client()}
+	owner := ownership.Owner{Namespace: "test", Kind: "StatefulSet", Name: "app", UID: "app-id"}
+	reason, generation, err := client.Reclaim(context.Background(), owner, true, true)
+	if err != nil || reason != ReclaimZero || generation != 42 {
+		t.Fatalf("reclaim = %v, %d, %v; want zero, 42, nil", reason, generation, err)
+	}
+	if requests != 1 {
+		t.Fatalf("requests = %d; want 1", requests)
 	}
 }

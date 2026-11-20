@@ -66,6 +66,7 @@ sed 's/SystemdCgroup = true/SystemdCgroup = false/' deploy/containerd-2.x-v3.tom
   node_exec tee "$drop_in" >/dev/null
 node_exec tee /etc/permabox/config.yaml >/dev/null <<EOF
 underlying_runtime: $runtime
+trusted_namespaces: ["$ns"]
 gc_on_workload_delete: true
 gc_on_scale_to_zero: true
 gc_workload_annotations: true

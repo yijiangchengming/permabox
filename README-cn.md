@@ -26,6 +26,8 @@ Deployment 副本的 Pod 名称不稳定，因此不支持 Deployment 持久化�
 
 安装 `permabox` RuntimeClass 后，在 Pod 中设置 `spec.runtimeClassName: permabox` 和注解 `permabox.io/persist: "true"`。多容器 Pod 使用 `permabox.io/container` 选择需要持久化根文件系统的容器。可参考 [StatefulSet 示例](deploy/statefulset.yaml)。
 
+启用持久化前，把命名空间加入 Helm 的 `trustedNamespaces` 或节点配置的 `trusted_namespaces`。只允许命名空间内所有有权创建 Pod 的用户都可信的命名空间。
+
 请将工作负载固定到保存其数据的节点，使用兼容的本地文件系统。可写层不支持 NFS 或共享存储。生产部署前应在目标节点验证内核、containerd 快照器和底层运行时的组合；更换镜像前请参阅[安全与镜像升级说明](deploy/README-cn.md)。
 
 ## 开发

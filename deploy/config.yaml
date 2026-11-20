@@ -1,6 +1,8 @@
 # Install as /etc/permabox/config.yaml on the selected node.
 storage_root: /var/lib/permabox/storage
 underlying_runtime: /usr/bin/runc
+# Exact Kubernetes namespace names allowed to use persistence. Empty denies persistence.
+trusted_namespaces: []
 # Optional aliases for permabox.io/storage-root and permabox.io/underlying-runtime.
 storage_roots: {}
 underlying_runtimes: {}

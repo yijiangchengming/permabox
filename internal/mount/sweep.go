@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -17,9 +18,19 @@ import (
 )
 
 const (
-	staleAge       = 5 * time.Minute
-	retiredPrefix  = ".permabox-retired-"
-	workloadMarker = ".permabox-workload.json"
+	staleAge        = 5 * time.Minute
+	retiredPrefix   = ".permabox-retired-"
+	workloadMarker  = ".permabox-workload.json"
+	scaleDownMarker = ".permabox-scale-down.json"
+	scaleDownGrace  = time.Minute
+)
+
+type ReclaimReason uint8
+
+const (
+	ReclaimNone ReclaimReason = iota
+	ReclaimZero
+	ReclaimDeleted
 )
 
 // ReleasedSlot identifies one release generation eligible for a policy check.
@@ -47,6 +58,33 @@ func (m Manager) DiscoverReleased(roots []string, target string, ttl time.Durati
 
 // RetireReleased rechecks the approved release generations under the mount lock.
 func (m Manager) RetireReleased(roots []string, target string, now time.Time, approved []ReleasedSlot) error {
+	return m.retireApproved(roots, target, now, approved, 0)
+}
+
+// StageScaledDown requires a later approval for the same release before deletion.
+func (m Manager) StageScaledDown(roots []string, target string, now time.Time, approved []ReleasedSlot, generation int64) error {
+	if generation <= 0 {
+		return errors.New("scale-down approval has no StatefulSet generation")
+	}
+	return m.retireApproved(roots, target, now, approved, generation)
+}
+
+type scaleDown struct {
+	Released   time.Time `json:"released"`
+	Since      time.Time `json:"since"`
+	Generation int64     `json:"generation"`
+}
+
+func scaleDownReady(slot ReleasedSlot, now time.Time, generation int64) (bool, error) {
+	path := filepath.Join(slot.path, scaleDownMarker)
+	var pending scaleDown
+	if readMarker(path, &pending) && pending.Generation == generation && pending.Released.Equal(slot.at) && !pending.Since.IsZero() && !now.Before(pending.Since) {
+		return now.Sub(pending.Since) >= scaleDownGrace, nil
+	}
+	return false, writeRecord(path, scaleDown{Released: slot.at, Since: now, Generation: generation})
+}
+
+func (m Manager) retireApproved(roots []string, target string, now time.Time, approved []ReleasedSlot, generation int64) error {
 	if len(approved) == 0 {
 		return nil
 	}
@@ -54,10 +92,23 @@ func (m Manager) RetireReleased(roots []string, target string, now time.Time, ap
 	for _, s := range approved {
 		byPath[s.path] = s
 	}
-	return m.sweep(roots, target, 0, now, func(s ReleasedSlot) bool {
+	if now.IsZero() {
+		now = time.Now()
+	}
+	var stageErr error
+	err := m.sweep(roots, target, 0, now, func(s ReleasedSlot) bool {
 		a, ok := byPath[s.path]
-		return ok && s.owner == a.owner && s.at.Equal(a.at) && os.SameFile(s.file, a.file)
+		if !ok || s.owner != a.owner || !s.at.Equal(a.at) || !os.SameFile(s.file, a.file) {
+			return false
+		}
+		if generation == 0 {
+			return true
+		}
+		ready, err := scaleDownReady(s, now.UTC(), generation)
+		stageErr = errors.Join(stageErr, err)
+		return ready
 	})
+	return errors.Join(err, stageErr)
 }
 
 // Sweep retries released journals and recovers stale records in this mount
@@ -72,7 +123,7 @@ func (m Manager) sweep(roots []string, target string, idleTTL time.Duration, now
 		now = time.Now()
 	}
 	now = now.UTC()
-	lock, err := m.lock((idleTTL > 0 || filter != nil) && len(roots) != 0)
+	lock, err := m.lock(len(roots) != 0)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
@@ -141,7 +192,7 @@ func (m Manager) sweepLocked(roots []string, target string, ttl time.Duration, n
 		}
 		live = append(live, state)
 	}
-	if (ttl <= 0 && filter == nil) || unknown || len(roots) == 0 {
+	if unknown || len(roots) == 0 {
 		return nil, result
 	}
 	mounts, err = m.sys.mounts() // Refresh after unmounting.
@@ -200,6 +251,7 @@ func retireSlots(root, target, stateDir string, protectedRoots []string, live []
 	}
 	var retired []string
 	var result error
+	currentBoot := sync.OnceValues(bootID)
 	for _, namespace := range namespaces {
 		if !namespace.IsDir() || strings.HasPrefix(namespace.Name(), ".") {
 			continue
@@ -215,6 +267,17 @@ func retireSlots(root, target, stateDir string, protectedRoots []string, live []
 		}
 		for _, pod := range pods {
 			parked := strings.HasPrefix(pod.Name(), retiredPrefix)
+			if name, ok := strings.CutSuffix(pod.Name(), receiptSuffix); parked && ok && target == "" && pod.Type().IsRegular() {
+				path := filepath.Join(parent, name)
+				// A crash before the rename, or after deleting the directory,
+				// can leave a receipt with no directory to delete.
+				if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+					if err := removeDurable(path + receiptSuffix); err != nil {
+						result = errors.Join(result, err)
+					}
+				}
+				continue
+			}
 			if !pod.IsDir() || (strings.HasPrefix(pod.Name(), ".") && !parked) {
 				continue
 			}
@@ -224,6 +287,18 @@ func retireSlots(root, target, stateDir string, protectedRoots []string, live []
 			}
 			if overlap(slot, stateDir) || containsStorageRoot(slot, protectedRoots) || journalReferences(live, slot) || mountReferences(mounts, slot) {
 				continue
+			}
+			if parked {
+				var receipt retirementReceipt
+				if readMarker(slot+receiptSuffix, &receipt) {
+					if validRetirement(slot, receipt) {
+						retired = append(retired, slot)
+					}
+					continue
+				}
+				if _, err := os.Lstat(slot + receiptSuffix); !errors.Is(err, os.ErrNotExist) {
+					continue
+				}
 			}
 			owned, err := ownedSlot(slot)
 			if err != nil {
@@ -235,10 +310,23 @@ func retireSlots(root, target, stateDir string, protectedRoots []string, live []
 			}
 			marker := filepath.Join(slot, releasedMarker)
 			var released time.Time
+			if !parked {
+				eligible, err := recoverSlotRelease(slot, now, currentBoot)
+				if err != nil {
+					result = errors.Join(result, err)
+				}
+				if !eligible {
+					continue
+				}
+			}
 			if !readMarker(marker, &released) || released.IsZero() {
 				continue
 			}
 			if parked {
+				if err := recordRetirement(slot, slot); err != nil {
+					result = errors.Join(result, err)
+					continue
+				}
 				retired = append(retired, slot)
 				continue
 			}
@@ -302,6 +390,37 @@ func journalReferences(live []record, slot string) bool {
 	return false
 }
 
+const receiptSuffix = ".receipt"
+
+type retirementReceipt struct {
+	Inode uint64 `json:"inode"`
+}
+
+func retirementIdentity(path string) (retirementReceipt, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return retirementReceipt{}, err
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || !info.IsDir() {
+		return retirementReceipt{}, errUnsafeDir
+	}
+	return retirementReceipt{Inode: stat.Ino}, nil
+}
+
+func validRetirement(slot string, receipt retirementReceipt) bool {
+	got, err := retirementIdentity(slot)
+	return err == nil && receipt == got
+}
+
+func recordRetirement(original, parked string) error {
+	receipt, err := retirementIdentity(original)
+	if err != nil {
+		return err
+	}
+	return writeRecord(parked+receiptSuffix, receipt)
+}
+
 func retireSlot(slot string) (string, error) {
 	parent := filepath.Dir(slot)
 	retired, err := os.MkdirTemp(parent, retiredPrefix)
@@ -313,8 +432,14 @@ func retireSlot(slot string) (string, error) {
 	if err := os.Remove(retired); err != nil {
 		return "", err
 	}
-	if err := os.Rename(slot, retired); err != nil {
+	if _, err := os.Lstat(retired + receiptSuffix); !errors.Is(err, os.ErrNotExist) {
+		return "", errors.New("retirement name already has a receipt")
+	}
+	if err := recordRetirement(slot, retired); err != nil {
 		return "", err
+	}
+	if err := os.Rename(slot, retired); err != nil {
+		return "", errors.Join(err, removeDurable(retired+receiptSuffix))
 	}
 	return retired, syncDir(parent)
 }
@@ -330,7 +455,25 @@ func deleteRetired(slot string) error {
 	}
 	defer parent.Close()
 	path := filepath.Join(fmt.Sprintf("/proc/self/fd/%d", parent.Fd()), filepath.Base(slot))
+	var receipt retirementReceipt
+	if !readMarker(path+receiptSuffix, &receipt) {
+		return nil
+	}
+	if !validRetirement(path, receipt) {
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			return errors.New("retired directory does not match its receipt")
+		}
+	}
+	if err := parent.Sync(); err != nil {
+		return err
+	}
 	if err := os.RemoveAll(path); err != nil {
+		return err
+	}
+	if err := parent.Sync(); err != nil {
+		return err
+	}
+	if err := remove(path + receiptSuffix); err != nil {
 		return err
 	}
 	return parent.Sync()

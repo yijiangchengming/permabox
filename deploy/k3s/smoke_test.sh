@@ -48,6 +48,7 @@ node=$(k get nodes -o json | jq -er '.items | select(length == 1) | .[0].metadat
 echo 'Installing PermaBox and checking the live CRI handler'
 helm upgrade --install permabox "$chart" -n "$installer_ns" --create-namespace \
   --set-string "nodeSelector.kubernetes\\.io/hostname=$node" \
+  --set-string "trustedNamespaces[0]=$demo_ns" \
   --set-string image.repository=docker.io/library/permabox-installer --set-string image.tag=ci \
   --set-string image.pullPolicy=Never --set-string storageRoot="$storage" \
   --set gcOnScaleToZero=true --set gcOnWorkloadDelete=true --set gcIntervalSeconds=5 \
