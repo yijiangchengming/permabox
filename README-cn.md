@@ -20,6 +20,8 @@ Deployment 副本的 Pod 名称不稳定，因此不支持 Deployment 持久化�
 | 环境 | 指南 |
 | --- | --- |
 | 由 systemd 管理、使用内置 containerd 的 K3s | [使用 Helm 安装](deploy/k3s/README-cn.md) |
+
+其他发行版的注册方式及已验证版本见 [Kubernetes 兼容矩阵](deploy/kubernetes/README-cn.md)。
 | Linux 上独立运行的 containerd | [手动部署与验收](deploy/README-cn.md) |
 
 安装 `permabox` RuntimeClass 后，在 Pod 中设置 `spec.runtimeClassName: permabox` 和注解 `permabox.io/persist: "true"`。多容器 Pod 使用 `permabox.io/container` 选择需要持久化根文件系统的容器。可参考 [StatefulSet 示例](deploy/statefulset.yaml)。

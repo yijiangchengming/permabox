@@ -11,6 +11,11 @@ ns=permabox-demo
 pod=permabox-demo-0
 [[ $config_version == 2 || $config_version == 3 ]]
 [[ $runtime == runc || $runtime == crun ]]
+# Avoid deleting or altering somebody else's cluster on a local run.
+if kind get clusters | grep -Fxq "$cluster"; then
+  printf 'Cluster %s already exists\n' "$cluster" >&2
+  exit 1
+fi
 work=$(mktemp -d)
 export KUBECONFIG=$work/kubeconfig
 node_exec() { docker exec "$node" "$@"; }
@@ -25,15 +30,16 @@ cleanup() {
     node_exec tail -n 100 /var/log/permabox.log || true
     node_exec journalctl -u containerd --no-pager -n 120 || true
   fi
-  kind delete cluster --name "$cluster" || true
-  rm -rf -- "$work"
+  kind delete cluster --name "$cluster" || status=1
+  # The test node can leave root-owned directories in the bind mount.
+  if [[ $(id -u) == 0 ]]; then
+    rm -rf -- "$work" || status=1
+  else
+    sudo -n rm -rf -- "$work" || status=1
+  fi
+  exit "$status"
 }
 
-# Avoid deleting or altering somebody else's cluster on a local run.
-if kind get clusters | grep -Fxq "$cluster"; then
-  printf 'Cluster %s already exists\n' "$cluster" >&2
-  exit 1
-fi
 trap cleanup EXIT
 
 mkdir -p "$work/storage"
@@ -52,7 +58,8 @@ fi
 node_exec containerd --version
 if [[ $runtime == crun ]]; then
   node_exec apt-get update -qq
-  node_exec apt-get install -y -qq --no-install-recommends crun
+  node_exec apt-get install -y -qq --no-install-recommends crun dbus
+  node_exec systemctl start dbus.socket
 fi
 node_exec install -d -m 0700 /opt/permabox
 node_exec install -d /etc/permabox
@@ -93,6 +100,7 @@ gc_removed() { gc && removed; }
 
 slot=/var/lib/permabox/storage/$ns/$pod
 app apply -f deploy/statefulset.yaml
+app patch statefulset permabox-demo --type=merge -p '{"spec":{"template":{"spec":{"terminationGracePeriodSeconds":1}}}}'
 wait_for new_pod ''
 ready
 original=$(uid)

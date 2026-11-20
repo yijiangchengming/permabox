@@ -22,6 +22,8 @@ Deployment replicas do not have stable Pod names and are unsupported for persist
 | Systemd-managed K3s with embedded containerd | [Install with Helm](deploy/k3s/README.md) |
 | Standalone containerd on Linux | [Manual installation and verification](deploy/README.md) |
 
+See the [Kubernetes compatibility matrix](deploy/kubernetes/README.md) for tested versions and instructions for other distributions.
+
 After installing the `permabox` RuntimeClass, set `spec.runtimeClassName: permabox` and `permabox.io/persist: "true"` on the Pod. In a multi-container Pod, use `permabox.io/container` to select the container whose root filesystem should persist. See the [StatefulSet example](deploy/statefulset.yaml).
 
 Keep the workload on the node holding its data and use a compatible local filesystem. NFS and shared writable layers are unsupported. Test your kernel, containerd snapshotter, and underlying runtime together before production deployment. Review the [security and upgrade guidance](deploy/README.md) before reusing a writable layer with a different image.
