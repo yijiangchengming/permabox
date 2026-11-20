@@ -94,6 +94,39 @@ func TestSweepWorkloadsRoutesConfirmedReasons(t *testing.T) {
 	}
 }
 
+func TestSweepWorkloadsConfirmsEachGroupAfterPreviousRetirement(t *testing.T) {
+	base := privateStateDir(t)
+	store := filepath.Join(filepath.Dir(base), "store")
+	roots := []string{store}
+	now := time.Now()
+	manager := mount.New(base)
+	slot := writeGCSlot(t, store, "b-0", gcTestOwner("b"), now)
+	zero := reclaimDecision{reason: mount.ReclaimZero, generation: 1}
+	if err := sweepWorkloads(manager, roots, "", 0, now, func(context.Context, ownership.Owner) (reclaimDecision, error) {
+		return zero, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	previous := writeGCSlot(t, store, "a-0", gcTestOwner("a"), now)
+	checks := 0
+	err := sweepWorkloads(manager, roots, "", 0, now.Add(time.Hour), func(_ context.Context, owner ownership.Owner) (reclaimDecision, error) {
+		if owner.Name == "a" {
+			return reclaimDecision{reason: mount.ReclaimDeleted}, nil
+		}
+		checks++
+		if checks == 2 {
+			if _, err := os.Stat(previous); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("previous group should be retired before the last check: %v", err)
+			}
+			return reclaimDecision{}, nil // Desired replicas changed during earlier cleanup.
+		}
+		return zero, nil
+	})
+	if _, statErr := os.Stat(slot); err != nil || checks != 2 || statErr != nil {
+		t.Fatalf("sweep=%v checks=%d slot=%v", err, checks, statErr)
+	}
+}
+
 func TestSweepWorkloadsRestartsGraceAfterGenerationChange(t *testing.T) {
 	base := privateStateDir(t)
 	store := filepath.Join(filepath.Dir(base), "store")

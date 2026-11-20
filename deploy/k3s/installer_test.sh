@@ -7,21 +7,35 @@ source ./installer.sh
 reconcile() ( reconcile_node once )
 
 tmp=$(mktemp -d)
-trap 'rm -rf "$tmp"' EXIT
+bridge_supervisor=''
+legacy_pid=''
+trap 'for pid in "$bridge_supervisor" "$legacy_pid"; do if [[ -n $pid ]]; then kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi; done; rm -rf "$tmp"' EXIT
 export HOST_ROOT="$tmp/host" OWNER=default/permabox K3S_DATA_DIR=/data
 export READY_FILE="$tmp/ready" PAYLOAD="$tmp/permabox" RESTART_TIMEOUT=2
+export BRIDGE_READY_FILE="$tmp/bridge-ready"
 mkdir -p "$HOST_ROOT/data/agent/etc/containerd" "$HOST_ROOT/data/data/current/bin" "$HOST_ROOT/run"
 # The fixture expands these variables when invoked as the payload.
 # shellcheck disable=SC2016
 printf '%s\n' '#!/bin/sh' \
   'if [ "${1:-}" = serve-workloads ]; then' \
+  '  exec 8>>"$2.lock"; flock -n 8 || exit 1' \
   '  echo "$$" >"${READY_FILE}.bridge-pid"' \
-  '  touch "$2.new" && mv -f "$2.new" "$2" || exit 1; exec sleep 15' \
+  '  touch "$2.new" && mv -f "$2.new" "$2" || exit 1; exec sleep 120' \
   'fi' \
   'if [ "${1:-}" = check-workload-bridge ]; then' \
   '  [ -f "$2" ] && [ ! -f "${READY_FILE}.deny" ] && [ "${reject_bridge:-0}" = 0 ] || exit 1' \
   '  printf "%s\n" bridge >>"${READY_FILE}.events"; exit 0' \
   'fi' \
+  'case "${1:-}" in' \
+  '  --root) shift 2 ;;' \
+  'esac' \
+  'case "${1:-}" in' \
+  '  create)' \
+  '    echo "$$" >"${READY_FILE}.create"' \
+  '    while [ ! -e "${READY_FILE}.release-create" ]; do sleep 0.05; done' \
+  '    touch "$HOST_ROOT/run/permabox/in-flight.runtime"; exit 0 ;;' \
+  '  delete) touch "${READY_FILE}.delete"; exit 0 ;;' \
+  'esac' \
   '[ "$#" -eq 1 ] && [ "$1" = validate-config ] || exit 1' \
   'case "$PERMABOX_CONFIG" in "$HOST_ROOT"/opt/permabox-k3s/.stage.*/config.yaml) ;; *) exit 1 ;; esac' \
   '[ -s "$PERMABOX_CONFIG" ] && [ "${reject_config:-0}" = 0 ]' >"$PAYLOAD"
@@ -102,6 +116,31 @@ test ! -e "$READY_FILE"
 test ! -e "$tmp/restarts"
 cmp "$tmp/original" "$templates/config-v3.toml.tmpl"
 chmod 0755 "$HOST_ROOT/opt/permabox-k3s"
+socket_path="$HOST_ROOT/opt/permabox-k3s/workload.sock"
+"$PAYLOAD" serve-workloads "$socket_path" &
+legacy_pid=$!
+for ((i=0; i<100; i++)); do
+  if [[ -f $socket_path ]]; then break; fi
+  sleep 0.05
+done
+test -f "$socket_path"
+legacy_socket=$(socket_identity "$socket_path")
+bridge_main &
+bridge_supervisor=$!
+if BRIDGE_TIMEOUT=1 reconcile 2>"$tmp/legacy-bridge-error"; then
+  printf '%s\n' 'accepted the old embedded bridge during lock migration' >&2; exit 1
+fi
+grep -Fq 'authenticated readiness check' "$tmp/legacy-bridge-error"
+test "$(socket_identity "$socket_path")" = "$legacy_socket"
+kill "$legacy_pid"
+wait "$legacy_pid" || true
+legacy_pid=''
+for ((i=0; i<100; i++)); do
+  if [[ -f $BRIDGE_READY_FILE ]]; then break; fi
+  sleep 0.05
+done
+test -f "$BRIDGE_READY_FILE"
+: >"$READY_FILE.events"
 reconcile
 if [[ ${1:-all} == all || $1 == bridge ]]; then
   test "$(sed -n '1,3p' "$READY_FILE.events")" = $'bridge\nrestart\nbridge'
@@ -174,6 +213,7 @@ if [[ ${1:-all} == all || $1 == bridge ]]; then
   fi
   grep -Fq 'unavailable before commit' "$tmp/bridge-error"
   rm "$READY_FILE.deny"
+  bridge_probe
   test ! -e "$READY_FILE"
   test ! -e "$HOST_ROOT/opt/permabox-k3s/.transaction"
   cmp "$tmp/original-config" "$HOST_ROOT/opt/permabox-k3s/config.yaml"
@@ -256,6 +296,18 @@ if GC_IDLE_TTL=48h reconcile 2>/dev/null; then
 fi
 cmp "$tmp/original-config" "$HOST_ROOT/opt/permabox-k3s/config.yaml"
 rm "$HOST_ROOT/run/permabox/live.runtime"
+cp "$HOST_ROOT/opt/permabox-k3s/runtime" "$tmp/gated-runtime"
+sed '/^# PermaBox create admission v1$/d' "$tmp/gated-runtime" >"$HOST_ROOT/opt/permabox-k3s/runtime"
+if MODE=remove reconcile 2>"$tmp/legacy-remove-error"; then exit 1; fi
+grep -Fq 'legacy runtime wrapper' "$tmp/legacy-remove-error"
+touch "$HOST_ROOT/run/permabox/live.runtime"
+if ALLOW_LEGACY_WRAPPER_MIGRATION=true reconcile 2>"$tmp/legacy-install-error"; then exit 1; fi
+grep -Fq 'before migrating the legacy runtime wrapper' "$tmp/legacy-install-error"
+rm "$HOST_ROOT/run/permabox/live.runtime"
+if reconcile 2>"$tmp/legacy-install-error"; then exit 1; fi
+grep -Fq 'allowLegacyWrapperMigration=true' "$tmp/legacy-install-error"
+ALLOW_LEGACY_WRAPPER_MIGRATION=true reconcile
+cmp "$tmp/gated-runtime" "$HOST_ROOT/opt/permabox-k3s/runtime"
 export MODE=remove
 touch "$HOST_ROOT/run/permabox/live.json"
 if reconcile 2>/dev/null; then
@@ -271,6 +323,7 @@ reconcile
 cmp "$tmp/original" "$templates/config-v3.toml.tmpl"
 test -f "$HOST_ROOT/var/lib/permabox/storage/default/demo-0/upper/keep"
 test ! -e "$HOST_ROOT/opt/permabox-k3s/runtime"
+bridge_probe
 test "$(wc -l <"$tmp/restarts")" -eq "$((restarts_before + 2))"
 reconcile
 test "$(wc -l <"$tmp/restarts")" -eq "$((restarts_before + 2))"
@@ -305,9 +358,8 @@ if [[ ${1:-all} == all || $1 == signal ]]; then
   bridge_process=$(<"$READY_FILE.bridge-pid")
   kill -TERM "$main_pid"
   wait "$main_pid"
-  if kill -0 "$bridge_process" 2>/dev/null; then
-    kill "$bridge_process" 2>/dev/null || true
-    printf '%s\n' 'installer termination left its bridge running' >&2; exit 1
+  if ! kill -0 "$bridge_process" 2>/dev/null; then
+    printf '%s\n' 'installer termination stopped the metadata bridge' >&2; exit 1
   fi
   test ! -e "$READY_FILE"
 fi
@@ -336,5 +388,50 @@ fi
 cmp "$tmp/original-v2" "$templates/config.toml.tmpl"
 test ! -e "$READY_FILE"
 test ! -e "$tmp/slept-after-failure"
+
+if [[ ${1:-all} == all || $1 == gate ]]; then
+  unset fail_restart
+  reconcile
+  # Run the actual generated wrapper against the mock host directory.
+  sed "s|^base=.*|base=$HOST_ROOT/opt/permabox-k3s|" "$HOST_ROOT/opt/permabox-k3s/runtime" >"$tmp/runtime"
+  sh "$tmp/runtime" --root /somewhere create test-id &
+  create_pid=$!
+  for ((i=0; i<100; i++)); do
+    if [[ -f $READY_FILE.create ]]; then break; fi
+    sleep 0.05
+  done
+  test -f "$READY_FILE.create"
+  test "$(<"$READY_FILE.create")" = "$create_pid"
+  (if MODE=remove reconcile; then touch "$tmp/removal-succeeded"; fi) &
+  remove_pid=$!
+  for ((i=0; i<100; i++)); do
+    if [[ -e $HOST_ROOT/opt/permabox-k3s/create-closed ]]; then break; fi
+    sleep 0.05
+  done
+  if [[ -e $tmp/removal-succeeded ]]; then
+    touch "$READY_FILE.release-create"
+    wait "$create_pid" "$remove_pid"
+    printf '%s\n' 'removed the runtime while a create was still in flight' >&2; exit 1
+  fi
+  sh "$tmp/runtime" --root /somewhere delete test-id
+  test -f "$READY_FILE.delete"
+  touch "$READY_FILE.release-create"
+  wait "$create_pid" "$remove_pid"
+  test ! -e "$tmp/removal-succeeded"
+  test -e "$HOST_ROOT/opt/permabox-k3s/create-closed"
+  test -x "$HOST_ROOT/opt/permabox-k3s/runtime"
+  if sh "$tmp/runtime" create rejected-during-drain 2>"$tmp/gate-error"; then exit 1; fi
+  grep -Fq 'admission is closed' "$tmp/gate-error"
+  rm "$HOST_ROOT/run/permabox/in-flight.runtime"
+  if MODE=remove fail_restart=1 reconcile 2>/dev/null; then exit 1; fi
+  test -e "$HOST_ROOT/opt/permabox-k3s/create-closed"
+  test -x "$HOST_ROOT/opt/permabox-k3s/runtime"
+  bridge_probe
+  reconcile
+  test ! -e "$HOST_ROOT/opt/permabox-k3s/create-closed"
+  MODE=remove reconcile
+  if sh "$tmp/runtime" create late-create; then exit 1; fi
+  test -e "$HOST_ROOT/opt/permabox-k3s/create.lock"
+fi
 
 printf '%s\n' 'Installer lifecycle tests passed'

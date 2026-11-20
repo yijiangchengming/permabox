@@ -4,6 +4,7 @@ package mount
 
 import (
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,6 +21,7 @@ type slotUse struct {
 	Boot      string `json:"boot"`
 	ID        string `json:"container_id"`
 	Confirmed bool   `json:"confirmed,omitempty"`
+	Fresh     bool   `json:"fresh,omitempty"`
 }
 
 func bootID() (string, error) {
@@ -34,12 +36,12 @@ func bootID() (string, error) {
 	return id, nil
 }
 
-func beginSlotUse(slot, id string) error {
+func beginSlotUse(slot, id string, fresh bool) error {
 	boot, err := bootID()
 	if err != nil {
 		return err
 	}
-	if err := writeRecord(filepath.Join(slot, useMarker), slotUse{Boot: boot, ID: id}); err != nil {
+	if err := writeRecord(filepath.Join(slot, useMarker), slotUse{Boot: boot, ID: id, Fresh: fresh}); err != nil {
 		return err
 	}
 	// Older runtimes do not check the use marker during rollback.
@@ -62,6 +64,7 @@ func confirmSlotUse(slot, id string, owner ownership.Owner) error {
 		return err
 	}
 	use.Confirmed = true
+	use.Fresh = false
 	return writeRecord(path, use)
 }
 
@@ -72,14 +75,32 @@ func recoverSlotRelease(slot string, now time.Time, currentBoot func() (string, 
 		return errors.Is(err, os.ErrNotExist), nil
 	}
 	var use slotUse
-	if !readMarker(path, &use) || !use.Confirmed || use.Boot == "" || !oci.ValidID(use.ID) {
+	if !readMarker(path, &use) || use.Boot == "" || !oci.ValidID(use.ID) {
 		return false, nil
+	}
+	marker := filepath.Join(slot, releasedMarker)
+	if !use.Confirmed {
+		var released time.Time
+		if !use.Fresh || !readMarker(marker, &released) || released.IsZero() {
+			return false, nil
+		}
+		// Even a failed start may have written data. Only an empty upper from
+		// a slot with no prior confirmed use is eligible for idle TTL.
+		if _, err := os.Lstat(filepath.Join(slot, workloadMarker)); !errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		upper, err := openRealDir(filepath.Join(slot, "upper"))
+		if err != nil {
+			return false, nil
+		}
+		defer upper.Close()
+		_, err = upper.Readdirnames(1)
+		return errors.Is(err, io.EOF), nil
 	}
 	var owner ownership.Owner
 	if !readMarker(filepath.Join(slot, workloadMarker), &owner) || !owner.Valid() {
 		return false, nil
 	}
-	marker := filepath.Join(slot, releasedMarker)
 	if _, err := os.Lstat(marker); !errors.Is(err, os.ErrNotExist) {
 		return err == nil, err
 	}

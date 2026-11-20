@@ -41,6 +41,7 @@ helm upgrade --install permabox ./deploy/helm/permabox \
   --wait --timeout 10m
 
 kubectl -n permabox-system rollout status daemonset/permabox-installer --timeout=5m
+kubectl -n permabox-system rollout status daemonset/permabox-bridge --timeout=5m
 kubectl -n permabox-system get daemonset permabox-installer
 ```
 
@@ -60,6 +61,8 @@ The chart applies the same `nodeSelector` and `tolerations` to the installer and
 | `storageRoot` | `/var/lib/permabox/storage` |
 | `storageRoots` | `{}`. Maps storage aliases to absolute paths on the node. |
 | `trustedNamespaces` | `[]`. Explicit list of namespaces allowed to use persistence. Add your workload namespaces, including when upgrading. |
+| `bridgeImage` | `{}`. Inherits the installer image. Set `bridgeImage.tag` and, if needed, `bridgeImage.repository` and `bridgeImage.pullPolicy` to pin a known-good bridge separately. |
+| `allowLegacyWrapperMigration` | `false`. Set once in install mode after draining all PermaBox workloads from nodes with an ungated wrapper. |
 | `underlyingRuntimes` | `{}`. Maps runtime aliases to absolute binary paths on the host. |
 | `gcIdleTTL` | `"0s"`. A Go duration; by default, GC retains released data and still retries stale cleanup. |
 | `gcOnWorkloadDelete` | `false`. Enable to reclaim safely released writable layers when their StatefulSet is deleted. |
@@ -73,6 +76,8 @@ Use `permabox.io/storage-root` to set a storage alias for the container selected
 The installer runs `permabox validate-config` on the staged configuration before publishing it. The default runtime and any runtime alias must not point to `/opt/permabox-k3s/runtime`, because that would call PermaBox recursively.
 
 The installer requires a healthy metadata bridge and checks existing writable layers for verifiable StatefulSet identity before publishing the upgrade. Resolve any legacy layer errors before retrying. A failed CRI handler transition restores the previous transaction state; allow time for K3s to restart and the previous handler to become ready.
+
+The bridge runs in its own DaemonSet and survives installer Pod replacement and host rollback. It uses the same socket as the earlier embedded bridge and waits for the old process to release its lock. When upgrading from an ungated wrapper, stop all PermaBox Pods and prevent their controllers from creating replacements, then finish a verified install-mode upgrade with `--set allowLegacyWrapperMigration=true` before resuming workloads or switching to remove mode. Legacy processes that are already in flight cannot be counted by the new gate. Do not roll Helm back to a chart that removes the dedicated DaemonSet on a node serving PermaBox workloads. With the default shared image, a broken image can affect both DaemonSets, and rolling a bridge on a node can briefly interrupt new persistent creates; pin `bridgeImage` separately to keep it out of routine installer image changes.
 
 ## Workload garbage collection
 
@@ -115,6 +120,6 @@ kubectl -n permabox-system get daemonset permabox-installer
 helm uninstall permabox --namespace permabox-system
 ```
 
-Remove mode skips GC. It removes the runtime registration and the binary and configuration managed by the installer, while preserving storage roots and persistent data. If a node is offline, wait for it to return and verify cleanup there.
+Remove mode closes admission to new runtime creates, waits for in-flight creates, and allows deletes to continue. If records remain or host rollback restores the handler, admission stays closed and the bridge stays available. Finish deleting the workloads and retry remove mode, or run a successful install-mode reconciliation to cancel the drain and reopen admission. After verified removal, Helm uninstall also removes the bridge. Remove mode skips GC and preserves storage roots and persistent data. If a node is offline, wait for it to return and verify cleanup there.
 
 For related deployment patterns, see [Sysbox Kubernetes DaemonSet](https://github.com/nestybox/sysbox/blob/master/docs/user-guide/install-k8s.md) and [Kata Deploy](https://github.com/kata-containers/kata-containers/tree/main/tools/packaging/kata-deploy). For template behavior, see the [K3s containerd configuration documentation](https://docs.k3s.io/advanced#configuring-containerd).

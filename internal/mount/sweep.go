@@ -49,7 +49,7 @@ type slotFilter func(ReleasedSlot) bool
 // An empty target selects all storage slots.
 func (m Manager) DiscoverReleased(roots []string, target string, ttl time.Duration, now time.Time) ([]ReleasedSlot, error) {
 	var candidates []ReleasedSlot
-	err := m.sweep(roots, target, ttl, now, func(s ReleasedSlot) bool {
+	err := m.sweep(roots, target, ttl, now, time.Time{}, func(s ReleasedSlot) bool {
 		candidates = append(candidates, s)
 		return false
 	})
@@ -58,15 +58,15 @@ func (m Manager) DiscoverReleased(roots []string, target string, ttl time.Durati
 
 // RetireReleased rechecks the approved release generations under the mount lock.
 func (m Manager) RetireReleased(roots []string, target string, now time.Time, approved []ReleasedSlot) error {
-	return m.retireApproved(roots, target, now, approved, 0)
+	return m.retireApproved(roots, target, now, approved, 0, time.Time{})
 }
 
-// StageScaledDown requires a later approval for the same release before deletion.
-func (m Manager) StageScaledDown(roots []string, target string, now time.Time, approved []ReleasedSlot, generation int64) error {
-	if generation <= 0 {
-		return errors.New("scale-down approval has no StatefulSet generation")
+// StageScaledDownBefore requires a renewed approval with a short lifetime.
+func (m Manager) StageScaledDownBefore(roots []string, target string, now time.Time, approved []ReleasedSlot, generation int64, deadline time.Time) error {
+	if generation <= 0 || deadline.IsZero() {
+		return errors.New("scale-down approval requires a StatefulSet generation and deadline")
 	}
-	return m.retireApproved(roots, target, now, approved, generation)
+	return m.retireApproved(roots, target, now, approved, generation, deadline)
 }
 
 type scaleDown struct {
@@ -84,7 +84,7 @@ func scaleDownReady(slot ReleasedSlot, now time.Time, generation int64) (bool, e
 	return false, writeRecord(path, scaleDown{Released: slot.at, Since: now, Generation: generation})
 }
 
-func (m Manager) retireApproved(roots []string, target string, now time.Time, approved []ReleasedSlot, generation int64) error {
+func (m Manager) retireApproved(roots []string, target string, now time.Time, approved []ReleasedSlot, generation int64, deadline time.Time) error {
 	if len(approved) == 0 {
 		return nil
 	}
@@ -96,7 +96,7 @@ func (m Manager) retireApproved(roots []string, target string, now time.Time, ap
 		now = time.Now()
 	}
 	var stageErr error
-	err := m.sweep(roots, target, 0, now, func(s ReleasedSlot) bool {
+	err := m.sweep(roots, target, 0, now, deadline, func(s ReleasedSlot) bool {
 		a, ok := byPath[s.path]
 		if !ok || s.owner != a.owner || !s.at.Equal(a.at) || !os.SameFile(s.file, a.file) {
 			return false
@@ -104,9 +104,12 @@ func (m Manager) retireApproved(roots []string, target string, now time.Time, ap
 		if generation == 0 {
 			return true
 		}
+		if !time.Now().Before(deadline) {
+			return false
+		}
 		ready, err := scaleDownReady(s, now.UTC(), generation)
 		stageErr = errors.Join(stageErr, err)
-		return ready
+		return ready && time.Now().Before(deadline)
 	})
 	return errors.Join(err, stageErr)
 }
@@ -115,10 +118,10 @@ func (m Manager) retireApproved(roots []string, target string, now time.Time, ap
 // namespace. A positive idleTTL also enables deletion of released slots under
 // the supplied storage roots. A failed cleanup leaves its journal for retry.
 func (m Manager) Sweep(roots []string, idleTTL time.Duration, now time.Time) error {
-	return m.sweep(roots, "", idleTTL, now, nil)
+	return m.sweep(roots, "", idleTTL, now, time.Time{}, nil)
 }
 
-func (m Manager) sweep(roots []string, target string, idleTTL time.Duration, now time.Time, filter slotFilter) error {
+func (m Manager) sweep(roots []string, target string, idleTTL time.Duration, now, deadline time.Time, filter slotFilter) error {
 	if now.IsZero() {
 		now = time.Now()
 	}
@@ -130,7 +133,7 @@ func (m Manager) sweep(roots []string, target string, idleTTL time.Duration, now
 	if err != nil {
 		return err
 	}
-	retired, sweepErr := m.sweepLocked(roots, target, idleTTL, now, filter)
+	retired, sweepErr := m.sweepLocked(roots, target, idleTTL, now, deadline, filter)
 	result := errors.Join(sweepErr, lock.Close())
 	for _, slot := range retired {
 		if err := deleteRetired(slot); err != nil {
@@ -140,7 +143,7 @@ func (m Manager) sweep(roots []string, target string, idleTTL time.Duration, now
 	return result
 }
 
-func (m Manager) sweepLocked(roots []string, target string, ttl time.Duration, now time.Time, filter slotFilter) ([]string, error) {
+func (m Manager) sweepLocked(roots []string, target string, ttl time.Duration, now, deadline time.Time, filter slotFilter) ([]string, error) {
 	ns, err := m.sys.namespace()
 	if err != nil {
 		return nil, err
@@ -214,7 +217,7 @@ func (m Manager) sweepLocked(roots []string, target string, ttl time.Duration, n
 			result = errors.Join(result, fmt.Errorf("invalid storage root %q", root))
 			continue
 		}
-		paths, err := retireSlots(filepath.Clean(root), target, m.Dir, protectedRoots, live, mounts, ttl, now, filter)
+		paths, err := retireSlots(filepath.Clean(root), target, m.Dir, protectedRoots, live, mounts, ttl, now, deadline, filter)
 		retired = append(retired, paths...)
 		result = errors.Join(result, err)
 	}
@@ -235,7 +238,7 @@ func staleRoot(root string, mounts []entry) bool {
 	return true
 }
 
-func retireSlots(root, target, stateDir string, protectedRoots []string, live []record, mounts []entry, ttl time.Duration, now time.Time, filter slotFilter) ([]string, error) {
+func retireSlots(root, target, stateDir string, protectedRoots []string, live []record, mounts []entry, ttl time.Duration, now, deadline time.Time, filter slotFilter) ([]string, error) {
 	if target != "" && filepath.Dir(filepath.Dir(target)) != root {
 		return nil, nil
 	}
@@ -340,12 +343,14 @@ func retireSlots(root, target, stateDir string, protectedRoots []string, live []
 					continue
 				}
 			}
-			path, err := retireSlot(slot)
+			path, err := retireSlot(slot, deadline)
 			if err != nil {
 				result = errors.Join(result, fmt.Errorf("retire slot %s: %w", slot, err))
 				continue
 			}
-			retired = append(retired, path)
+			if path != "" {
+				retired = append(retired, path)
+			}
 		}
 	}
 	return retired, result
@@ -421,7 +426,7 @@ func recordRetirement(original, parked string) error {
 	return writeRecord(parked+receiptSuffix, receipt)
 }
 
-func retireSlot(slot string) (string, error) {
+func retireSlot(slot string, deadline time.Time) (string, error) {
 	parent := filepath.Dir(slot)
 	retired, err := os.MkdirTemp(parent, retiredPrefix)
 	if err != nil {
@@ -437,6 +442,9 @@ func retireSlot(slot string) (string, error) {
 	}
 	if err := recordRetirement(slot, retired); err != nil {
 		return "", err
+	}
+	if !deadline.IsZero() && !time.Now().Before(deadline) {
+		return "", removeDurable(retired + receiptSuffix)
 	}
 	if err := os.Rename(slot, retired); err != nil {
 		return "", errors.Join(err, removeDurable(retired+receiptSuffix))

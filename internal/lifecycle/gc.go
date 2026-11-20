@@ -37,17 +37,25 @@ func sweepWorkloads(manager mount.Manager, roots []string, target string, ttl ti
 }
 
 func sweepWorkloadBatch(manager mount.Manager, roots []string, target string, ttl time.Duration, now time.Time, limits gcLimits, reclaim reclaimer) error {
+	startedAt := time.Now()
+	if now.IsZero() {
+		now = startedAt
+	}
 	candidates, sweepErr := manager.DiscoverReleased(roots, target, ttl, now)
 	if len(candidates) == 0 {
 		return sweepErr
 	}
-	deleted, scaledDown, checkErr := checkWorkloadBatch(manager.Dir, candidates, limits, reclaim)
-	if len(deleted) > 0 {
-		sweepErr = errors.Join(sweepErr, manager.RetireReleased(roots, target, now, deleted))
-	}
-	for _, a := range scaledDown {
-		sweepErr = errors.Join(sweepErr, manager.StageScaledDown(roots, target, now, a.slots, a.generation))
-	}
+	checkErr := checkWorkloadBatch(manager.Dir, candidates, limits, reclaim, func(slots []mount.ReleasedSlot, decision reclaimDecision, checkedAt time.Time) error {
+		switch decision.reason {
+		case mount.ReclaimDeleted:
+			return manager.RetireReleased(roots, target, now, slots)
+		case mount.ReclaimZero:
+			approvedAt := now.Add(checkedAt.Sub(startedAt))
+			return manager.StageScaledDownBefore(roots, target, approvedAt, slots, decision.generation, checkedAt.Add(2*time.Second))
+		default:
+			return nil
+		}
+	})
 	return errors.Join(sweepErr, checkErr)
 }
 
@@ -56,16 +64,12 @@ type ownerGroup struct {
 	slots []mount.ReleasedSlot
 }
 
-type scaleDownApproval struct {
-	slots      []mount.ReleasedSlot
-	generation int64
-}
-
-func checkWorkloadBatch(dir string, candidates []mount.ReleasedSlot, limits gcLimits, reclaim reclaimer) (deleted []mount.ReleasedSlot, scaledDown []scaleDownApproval, result error) {
+func checkWorkloadBatch(dir string, candidates []mount.ReleasedSlot, limits gcLimits, reclaim reclaimer,
+	apply func([]mount.ReleasedSlot, reclaimDecision, time.Time) error) (result error) {
 	// Only policy checks take this lock. Mount operations use a different lock.
 	lock, err := os.OpenFile(filepath.Join(dir, gcCursor+".lock"), os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0600)
 	if err != nil {
-		return nil, nil, fmt.Errorf("open GC cursor lock: %w", err)
+		return fmt.Errorf("open GC cursor lock: %w", err)
 	}
 	defer lock.Close()
 	for {
@@ -75,15 +79,15 @@ func checkWorkloadBatch(dir string, candidates []mount.ReleasedSlot, limits gcLi
 		}
 	}
 	if errors.Is(err, syscall.EWOULDBLOCK) {
-		return nil, nil, nil // A concurrent sweep is already advancing this cursor.
+		return nil // A concurrent sweep is already advancing this cursor.
 	}
 	if err != nil {
-		return nil, nil, fmt.Errorf("lock GC cursor: %w", err)
+		return fmt.Errorf("lock GC cursor: %w", err)
 	}
 	cursorPath := filepath.Join(dir, gcCursor)
 	cursor, err := os.ReadFile(cursorPath)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return nil, nil, fmt.Errorf("read GC cursor: %w", err)
+		return fmt.Errorf("read GC cursor: %w", err)
 	}
 	groups := make(map[string]*ownerGroup)
 	var keys []string
@@ -91,7 +95,7 @@ func checkWorkloadBatch(dir string, candidates []mount.ReleasedSlot, limits gcLi
 		owner := slot.Owner()
 		encoded, err := json.Marshal(owner)
 		if err != nil {
-			return nil, nil, err
+			return err
 		}
 		key := string(encoded) // Includes policy overrides; those can differ for the same workload.
 		group := groups[key]
@@ -124,25 +128,23 @@ func checkWorkloadBatch(dir string, candidates []mount.ReleasedSlot, limits gcLi
 	if last != "" {
 		result = errors.Join(result, writeGCCursor(cursorPath, last))
 	}
-	confirm, cancelConfirm := context.WithTimeout(context.Background(), limits.confirmBudget)
-	defer cancelConfirm()
+	remaining := limits.confirmBudget
 	for _, a := range approved {
-		if confirm.Err() != nil {
+		if remaining <= 0 {
 			break
 		}
+		confirm, cancelConfirm := context.WithTimeout(context.Background(), remaining)
+		started := time.Now()
 		decision, err := checkReclaim(confirm, limits.ownerTimeout, a.group.owner, reclaim)
+		checkedAt := time.Now()
+		cancelConfirm()
+		remaining -= checkedAt.Sub(started)
 		result = errors.Join(result, err)
-		if decision != a.decision {
-			continue
-		}
-		switch decision.reason {
-		case mount.ReclaimDeleted:
-			deleted = append(deleted, a.group.slots...)
-		case mount.ReclaimZero:
-			scaledDown = append(scaledDown, scaleDownApproval{slots: a.group.slots, generation: decision.generation})
+		if err == nil && decision == a.decision {
+			result = errors.Join(result, apply(a.group.slots, decision, checkedAt))
 		}
 	}
-	return deleted, scaledDown, result
+	return result
 }
 
 func checkReclaim(parent context.Context, timeout time.Duration, owner ownership.Owner, reclaim reclaimer) (reclaimDecision, error) {

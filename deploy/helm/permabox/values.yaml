@@ -1,4 +1,6 @@
 mode: install
+# One-time opt-in after stopping all PermaBox work on legacy nodes.
+allowLegacyWrapperMigration: false
 
 image:
   # Set to the installer image repository (without a tag).
@@ -6,6 +8,9 @@ image:
   # An empty tag uses the chart appVersion.
   tag: ""
   pullPolicy: IfNotPresent
+
+# Set a tag to keep the bridge on a known-good image across installer upgrades.
+bridgeImage: {}
 
 k3s:
   dataDir: /var/lib/rancher/k3s

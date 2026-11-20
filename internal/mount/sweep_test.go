@@ -96,6 +96,63 @@ func TestFailedCreatePreservesOwner(t *testing.T) {
 	}
 }
 
+func TestIdleTTLReclaimsOnlyEmptyReleasedFirstUseWithoutConfirmation(t *testing.T) {
+	for _, scenario := range []struct {
+		name                                     string
+		payload, priorUse, released, mountFailed bool
+	}{
+		{name: "empty first use", released: true},
+		{name: "mount rollback", mountFailed: true},
+		{name: "possible writes before confirmation", payload: true, released: true},
+		{name: "previously confirmed use", priorUse: true, released: true},
+		{name: "not released"},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			m, sys, root, slot := fixture(t)
+			roots := []string{filepath.Dir(filepath.Dir(slot))}
+			owner := ownership.Owner{Namespace: "namespace", Kind: "StatefulSet", Name: "app", UID: "original"}
+			if scenario.priorUse {
+				if _, err := m.PrepareOwned("previous", root, slot, "app", owner); err != nil {
+					t.Fatal(err)
+				}
+				if err := m.ActivateOwnership("previous"); err != nil {
+					t.Fatal(err)
+				}
+				if err := m.Cleanup("previous"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			sys.fail = scenario.mountFailed
+			if _, err := m.PrepareOwned("failed", root, slot, "app", owner); (err != nil) != scenario.mountFailed {
+				t.Fatalf("prepare: %v", err)
+			}
+			if scenario.payload {
+				put(t, filepath.Join(slot, "upper"), "payload", "keep")
+			}
+			if scenario.released {
+				if err := m.Cleanup("failed"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			now := time.Now().Add(2 * time.Hour)
+			if err := m.Sweep(roots, 0, now); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(slot); err != nil {
+				t.Fatal(err)
+			}
+			if err := m.Sweep(roots, time.Hour, now); err != nil {
+				t.Fatal(err)
+			}
+			if scenario.name == "empty first use" || scenario.mountFailed {
+				assertMissing(t, slot)
+			} else if _, err := os.Stat(slot); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestRecoverConfirmedUseAfterReboot(t *testing.T) {
 	for _, confirmed := range []bool{false, true} {
 		m, sys, root, slot := fixture(t)
@@ -160,26 +217,44 @@ func TestScaleDownGraceProtectsReuse(t *testing.T) {
 		if err != nil || len(got) != 1 {
 			t.Fatalf("discover: %v, %v", got, err)
 		}
-		if err := m.StageScaledDown(roots, "", now, got, 1); err != nil {
+		if err := m.StageScaledDownBefore(roots, "", now, got, 1, time.Now().Add(time.Minute)); err != nil {
 			t.Fatal(err)
 		}
-		if err := m.StageScaledDown(roots, "", now.Add(scaleDownGrace-time.Second), got, 1); err != nil {
+		if err := m.StageScaledDownBefore(roots, "", now.Add(scaleDownGrace-time.Second), got, 1, time.Now().Add(time.Minute)); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := os.Stat(slot); err != nil {
 			t.Fatal(err)
 		}
 		if id == "replacement" {
-			if err := m.StageScaledDown(roots, "", now.Add(scaleDownGrace), got, 2); err != nil {
+			if err := m.StageScaledDownBefore(roots, "", now.Add(scaleDownGrace), got, 2, time.Now().Add(time.Minute)); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := os.Stat(slot); err != nil {
 				t.Fatal("generation change must restart the grace period", err)
 			}
-			if err := m.StageScaledDown(roots, "", now.Add(2*scaleDownGrace), got, 2); err != nil {
+			if err := m.StageScaledDownBefore(roots, "", now.Add(2*scaleDownGrace), got, 2, time.Now().Add(time.Minute)); err != nil {
 				t.Fatal(err)
 			}
 			assertMissing(t, slot)
+		}
+	}
+}
+
+func TestExpiredRetirementDoesNotRenameOrLeaveReceipt(t *testing.T) {
+	_, _, _, slot := fixture(t)
+	prepareReleasedSlot(t, slot, time.Now().Add(-time.Hour))
+	if parked, err := retireSlot(slot, time.Now().Add(-time.Second)); parked != "" || err != nil {
+		t.Fatalf("expired retirement = %q, %v", parked, err)
+	}
+	check(t, filepath.Join(slot, "upper"), "payload", "keep")
+	files, err := os.ReadDir(filepath.Dir(slot))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range files {
+		if strings.HasPrefix(file.Name(), retiredPrefix) {
+			t.Fatalf("expired retirement left %s", file.Name())
 		}
 	}
 }
@@ -189,7 +264,7 @@ func TestSweepResumesPartiallyDeletedRetirement(t *testing.T) {
 	store := filepath.Dir(filepath.Dir(slot))
 	now := time.Now()
 	prepareReleasedSlot(t, slot, now.Add(-2*time.Hour))
-	parked, err := retireSlot(slot)
+	parked, err := retireSlot(slot, time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}

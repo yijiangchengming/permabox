@@ -26,12 +26,19 @@ wait_for() {
   done
 }
 
-installer_ready() {
+daemonset_ready() {
   # A chart change can restart K3s and briefly interrupt the API connection.
-  k --request-timeout=10s -n "$installer_ns" get daemonset permabox-installer -o json | jq -e '
+  k --request-timeout=10s -n "$installer_ns" get daemonset "$1" -o json | jq -e '
     .status.observedGeneration == .metadata.generation and
     .status.desiredNumberScheduled == 1 and
     .status.updatedNumberScheduled == 1 and .status.numberReady == 1' >/dev/null
+}
+
+installer_ready() { daemonset_ready permabox-installer; }
+bridge_ready() { daemonset_ready permabox-bridge; }
+bridge_uid() {
+  k -n "$installer_ns" get pods -l app.kubernetes.io/name=permabox-bridge -o json |
+    jq -er '.items | select(length == 1) | .[0].metadata.uid'
 }
 
 new_pod() {
@@ -54,6 +61,8 @@ helm upgrade --install permabox "$chart" -n "$installer_ns" --create-namespace \
   --set gcOnScaleToZero=true --set gcOnWorkloadDelete=true --set gcIntervalSeconds=5 \
   --timeout 2m
 wait_for installer_ready
+wait_for bridge_ready
+original_bridge=$(bridge_uid)
 k get runtimeclass permabox -o json | jq -e '.handler == "permabox"'
 cri_info | jq -e '.config.containerd.runtimes.permabox.options.BinaryName == "/opt/permabox-k3s/runtime"'
 
@@ -76,6 +85,10 @@ demo exec "$pod" -c demo -- sh -ec '
   rm /etc/inittab
 '
 sudo test -f "$slot/upper/permabox-created"
+echo 'Replacing the installer without replacing the metadata bridge'
+k -n "$installer_ns" delete pod -l app.kubernetes.io/name=permabox-installer --wait=true
+wait_for installer_ready
+test "$(bridge_uid)" = "$original_bridge"
 demo delete pod "$pod" --wait=false
 wait_for new_pod "$uid"
 wait_pod
@@ -107,8 +120,11 @@ wait_for sudo test ! -e "$slot"
 echo 'Removing the runtime and uninstalling the chart'
 helm upgrade permabox "$chart" -n "$installer_ns" --reuse-values --set mode=remove --timeout 2m
 wait_for installer_ready
+wait_for bridge_ready
+test "$(bridge_uid)" = "$original_bridge"
 cri_info | jq -e '.config.containerd.runtimes | type == "object" and (has("permabox") | not)'
 sudo test ! -e /opt/permabox-k3s/runtime
+sudo test -f /opt/permabox-k3s/create-closed
 helm uninstall permabox -n "$installer_ns" --wait --timeout 2m
 runtime_class=$(k get runtimeclass permabox --ignore-not-found -o name)
 test -z "$runtime_class"

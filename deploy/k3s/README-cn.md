@@ -41,6 +41,7 @@ helm upgrade --install permabox ./deploy/helm/permabox \
   --wait --timeout 10m
 
 kubectl -n permabox-system rollout status daemonset/permabox-installer --timeout=5m
+kubectl -n permabox-system rollout status daemonset/permabox-bridge --timeout=5m
 kubectl -n permabox-system get daemonset permabox-installer
 ```
 
@@ -58,6 +59,8 @@ Chart 将同一套 `nodeSelector` 和 `tolerations` 应用于安装器和 Runtim
 | `storageRoot` | `/var/lib/permabox/storage` |
 | `storageRoots` | `{}`；存储别名到节点本地绝对路径的映射 |
 | `trustedNamespaces` | `[]`；显式允许使用持久化的命名空间，升级时也需要配置 |
+| `bridgeImage` | `{}`；默认沿用安装器镜像。设置 `bridgeImage.tag`，并按需设置 `bridgeImage.repository` 和 `bridgeImage.pullPolicy`，可独立固定已验证的桥接镜像 |
+| `allowLegacyWrapperMigration` | `false`；使用旧包装器的节点须先停止所有 PermaBox 工作负载，再在安装模式下一次性启用此项 |
 | `underlyingRuntimes` | `{}`；运行时别名到宿主机绝对二进制路径的映射 |
 | `gcIdleTTL` | `"0s"`；Go 时长，默认保留已释放的持久化数据，GC 仍重试残留清理 |
 | `gcOnWorkloadDelete` | `false`；设为 `true` 后，删除 StatefulSet 时回收其已安全释放的写层 |
@@ -71,6 +74,8 @@ Chart 将同一套 `nodeSelector` 和 `tolerations` 应用于安装器和 Runtim
 安装器通过 `permabox validate-config` 验证暂存的配置，验证成功后才发布。默认运行时和别名均不得指向安装器包装器 `/opt/permabox-k3s/runtime`，否则会递归调用 PermaBox。
 
 安装器会先确认元数据桥接可用，并检查现有写层是否有可核验的 StatefulSet 身份，再发布升级。若发现旧写层问题，请处理后重试。CRI handler 切换失败时会恢复事务记录的原状态；请预留时间让 K3s 重启并恢复原 handler。
+
+元数据桥接由独立的 DaemonSet 运行。安装器 Pod 替换或主机端事务回滚时，桥接仍可用。迁移时沿用原 socket，新桥接会等待旧进程释放锁。若原包装器没有创建准入锁，请停止所有 PermaBox Pod，并阻止控制器创建替代 Pod。以安装模式设置 `--set allowLegacyWrapperMigration=true`，确认升级就绪后再恢复业务或切换到卸载模式。新准入锁无法跟踪迁移前已启动的创建操作。承载 PermaBox 工作负载的节点不应通过 Helm 回退到会移除独立桥接的旧 Chart。默认共用镜像时，镜像故障可能同时影响两个 DaemonSet，滚动替换桥接也可能短暂阻塞新建持久化容器。可独立固定 `bridgeImage`，避免常规安装器镜像升级重启桥接。
 
 两项工作负载回收策略仅适用于 StatefulSet，可独立开启，例如 Helm 的 `--set gcOnWorkloadDelete=true --set gcOnScaleToZero=true`。已释放的写层由下一轮周期任务检查，默认间隔 60 秒，可通过 `gcIntervalSeconds` 调整。两项策略都无需等待 `gcIdleTTL`。即使关闭回收，Helm 也会启动只读元数据桥接以核验 StatefulSet UID。升级前请参考[旧写层迁移说明](../README-cn.md)。
 
@@ -109,6 +114,6 @@ kubectl -n permabox-system get daemonset permabox-installer
 helm uninstall permabox --namespace permabox-system
 ```
 
-卸载模式不执行 GC；它移除运行时注册和安装器管理的二进制、配置，并保留存储根目录和持久化数据。节点离线时应待其恢复后确认清理结果。
+卸载模式会关闭新建容器的准入，等待已开始的创建操作完成，同时允许继续删除容器。若仍有运行时记录，或主机事务回滚并恢复了 handler，准入继续关闭，桥接继续运行。删除剩余工作负载后重试卸载模式；如需取消清理，则成功执行一次安装模式以重新开放准入。确认主机端清理完成后，再通过 Helm 卸载桥接。卸载模式不执行 GC，保留存储根目录和持久化数据。节点离线时应待其恢复后确认清理结果。
 
 部署模式参考 [Sysbox Kubernetes DaemonSet](https://github.com/nestybox/sysbox/blob/master/docs/user-guide/install-k8s.md) 和 [Kata Deploy](https://github.com/kata-containers/kata-containers/tree/main/tools/packaging/kata-deploy)。模板行为参见 [K3s containerd 配置文档](https://docs.k3s.io/advanced#configuring-containerd)。

@@ -1,0 +1,51 @@
+{{- $image := .Values.bridgeImage | default dict -}}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "permabox.bridgeName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "permabox.bridgeLabels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "permabox.bridgeLabels" . | nindent 6 }}
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        {{- include "permabox.bridgeLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "permabox.workloadGCName" . }}
+      automountServiceAccountToken: true
+      {{- include "permabox.scheduling" . | nindent 6 }}
+      containers:
+        - name: bridge
+          image: {{ printf "%s:%s" (default .Values.image.repository $image.repository) (default (default .Chart.AppVersion .Values.image.tag) $image.tag) | quote }}
+          imagePullPolicy: {{ default .Values.image.pullPolicy $image.pullPolicy }}
+          command: ["/usr/local/bin/permabox-k3s", "bridge"]
+          securityContext:
+            runAsUser: 0
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          env:
+            - name: OWNER
+              value: {{ printf "%s/%s" .Release.Namespace .Release.Name | quote }}
+          readinessProbe:
+            timeoutSeconds: 5
+            exec:
+              command: ["/usr/local/bin/permabox-k3s", "bridge-health"]
+          volumeMounts:
+            - name: bridge-state
+              mountPath: /host/opt/permabox-k3s
+      volumes:
+        - name: bridge-state
+          hostPath:
+            path: /opt/permabox-k3s
+            type: DirectoryOrCreate

@@ -144,27 +144,39 @@ func (m Manager) PrepareOwned(id, root, slot, container string, owner ownership.
 	if _, err := os.Lstat(alias); !errors.Is(err, os.ErrNotExist) {
 		return false, fmt.Errorf("lower mount path is not available: %s", alias)
 	}
+	fresh := false
+	if owner.Valid() {
+		var previous slotUse
+		entries, err := os.ReadDir(slot)
+		if err != nil {
+			return false, err
+		}
+		fresh = len(entries) == 0 || (readMarker(filepath.Join(slot, useMarker), &previous) && previous.Fresh && !previous.Confirmed)
+	}
 	if err := bindSlotOwner(slot, owner); err != nil {
 		return false, err
 	}
 	if err := prepareSlot(slot, container, info); err != nil {
 		return false, err
 	}
+	if err := removeDurable(filepath.Join(slot, releasedMarker)); err != nil {
+		return false, err
+	}
 	if owner.Valid() {
-		if err := beginSlotUse(slot, id); err != nil {
+		if err := beginSlotUse(slot, id, fresh); err != nil {
 			return false, err
 		}
 	}
 	if err := removeDurable(filepath.Join(slot, scaleDownMarker)); err != nil {
 		return false, err
 	}
-	if err := removeDurable(filepath.Join(slot, releasedMarker)); err != nil {
-		return false, err
-	}
 	if err := writeRecord(m.journal(id), want); err != nil {
 		return false, err
 	}
 	if err := m.install(id, &want); err != nil {
+		if fresh {
+			return false, errors.Join(err, m.releaseLocked(id, want, time.Now().UTC()))
+		}
 		return false, errors.Join(err, m.cleanupLocked(id, want))
 	}
 	return true, nil
