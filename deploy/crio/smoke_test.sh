@@ -43,6 +43,7 @@ diagnostics() {
   fi
 }
 trap diagnostics EXIT
+trap 'printf "Smoke test failed at %s:%s: %s\n" "$0" "$LINENO" "$BASH_COMMAND" >&2' ERR
 
 node_exec swapoff -a
 node_exec modprobe overlay

@@ -47,4 +47,14 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends conntrack socat
       - name: Verify StatefulSet persistence and reclamation
-        run: bash deploy/crio/smoke_test.sh "$RUNNER_TEMP/crio-assets"
+        shell: bash
+        run: |
+          log="$RUNNER_TEMP/crio-smoke.log"
+          if ! bash deploy/crio/smoke_test.sh "$RUNNER_TEMP/crio-assets" 2>&1 | tee "$log"; then
+            error=$(sed '/^Smoke test failed at /q' "$log" | tail -n 8)
+            error=${error//%/%25}
+            error=${error//$'\r'/%0D}
+            error=${error//$'\n'/%0A}
+            printf '::error title=CRI-O smoke test failed::%s\n' "$error"
+            exit 1
+          fi
