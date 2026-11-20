@@ -39,8 +39,8 @@ smoke_lifecycle() {
   wait_for new_pod ''
   ready
   original=$(uid)
-  app exec "$pod" -c demo -- sh -ec 'test -f /etc/inittab; rm /etc/inittab; echo permabox >> /etc/alpine-release; echo persisted > /permabox-marker'
-  node_exec test -f "$slot/upper/permabox-marker"
+  app exec "$pod" -c demo -- sh -ec 'test -f /etc/inittab; rm /etc/inittab; echo permabox >> /etc/alpine-release; echo persisted > /etc/permabox-marker'
+  node_exec test -f "$slot/upper/etc/permabox-marker"
   app delete pod "$pod" --wait=false
   wait_for new_pod "$original"
   ready
@@ -48,7 +48,7 @@ smoke_lifecycle() {
   app exec "$pod" -c demo -- sh -ec '
     test ! -e /etc/inittab || { echo "/etc/inittab deletion did not persist" >&2; exit 1; }
     grep -Fxq permabox /etc/alpine-release || { echo "/etc/alpine-release modification did not persist" >&2; exit 1; }
-    test "$(cat /permabox-marker)" = persisted || { echo "/permabox-marker creation did not persist" >&2; exit 1; }
+    test "$(cat /etc/permabox-marker)" = persisted || { echo "/etc/permabox-marker creation did not persist" >&2; exit 1; }
   '
 
   app patch statefulset permabox-demo --type=merge -p '{"spec":{"template":{"metadata":{"annotations":{"permabox.io/gc-on-scale-to-zero":"false"}}}}}'
@@ -57,13 +57,13 @@ smoke_lifecycle() {
   wait_for stopped
   wait_for node_exec test -f "$slot/.permabox-released.json"
   gc
-  node_exec test -f "$slot/upper/permabox-marker"
+  node_exec test -f "$slot/upper/etc/permabox-marker"
 
   app patch statefulset permabox-demo --type=merge -p '{"spec":{"template":{"metadata":{"annotations":{"permabox.io/gc-on-scale-to-zero":null}}}}}'
   app scale statefulset permabox-demo --replicas=1
   wait_for new_pod ''
   ready
-  node_exec test -f "$slot/upper/permabox-marker"
+  node_exec test -f "$slot/upper/etc/permabox-marker"
   app scale statefulset permabox-demo --replicas=0
   wait_for stopped
   wait_for gc_removed
@@ -71,7 +71,7 @@ smoke_lifecycle() {
   app scale statefulset permabox-demo --replicas=1
   wait_for new_pod ''
   ready
-  app exec "$pod" -c demo -- sh -ec 'test -f /etc/inittab; ! grep -Fxq permabox /etc/alpine-release; test ! -e /permabox-marker'
+  app exec "$pod" -c demo -- sh -ec 'test -f /etc/inittab; if grep -Fxq permabox /etc/alpine-release; then exit 1; fi; test ! -e /etc/permabox-marker'
   node_exec test -d "$slot/upper"
   app delete statefulset permabox-demo --cascade=foreground --wait=false
   wait_for stopped
