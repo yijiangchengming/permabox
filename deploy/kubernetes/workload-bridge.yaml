@@ -1,0 +1,85 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: permabox-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: permabox-workload-bridge
+  namespace: permabox-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: permabox-workload-bridge
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get"]
+  - apiGroups: ["apps"]
+    resources: ["statefulsets"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: permabox-workload-bridge
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: permabox-workload-bridge
+subjects:
+  - kind: ServiceAccount
+    name: permabox-workload-bridge
+    namespace: permabox-system
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: permabox-workload-bridge
+  namespace: permabox-system
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: permabox-workload-bridge
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: permabox-workload-bridge
+    spec:
+      serviceAccountName: permabox-workload-bridge
+      nodeSelector:
+        kubernetes.io/os: linux
+        permabox.io.node-restriction.kubernetes.io/pinned: "true"
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: bridge
+          image: docker.io/library/alpine:3.22
+          command: ["/permabox", "serve-workloads", "/state/workload.sock"]
+          readinessProbe:
+            exec:
+              command: ["/permabox", "check-workload-bridge", "/state/workload.sock"]
+          securityContext:
+            runAsUser: 0
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: binary
+              mountPath: /permabox
+              readOnly: true
+            - name: socket
+              mountPath: /state
+      volumes:
+        - name: binary
+          hostPath:
+            path: /usr/local/bin/permabox
+            type: File
+        - name: socket
+          hostPath:
+            path: /opt/permabox
+            type: Directory
