@@ -2,7 +2,7 @@
 
 [简体中文](README-cn.md)
 
-This compatibility slice supports **CRI-O 1.34.0 with the VFS storage driver, conmon and runc**. Use a dedicated Linux node or disposable CRI-O instance. VFS is a CRI-O-wide setting, needs a separate graph and run root, and uses more disk space because it copies layers. Do not switch an existing production node to VFS in place. Checkpoint/restore, alternate OCI runtimes, user namespaces and enforcing SELinux were not validated by this slice.
+The supported configuration is **CRI-O 1.34.0 with VFS, conmon 2.1.13 and runc 1.3.1**. Use a dedicated Linux node or disposable CRI-O instance. VFS is a CRI-O-wide setting, needs a separate graph and run root, and uses more disk space because it copies layers. Do not switch an existing production node to VFS in place. The [CRI-O compatibility workflow](../../.github/workflows/compat-crio.yml) pairs these binaries with upstream Kubernetes 1.34.0 and checks file creation, modification and deletion across Pod replacement, scale-to-zero reclamation, StatefulSet deletion and annotation overrides. Checkpoint/restore, alternate OCI runtimes, user namespaces, enforcing SELinux and OpenShift are outside this test coverage.
 
 CRI-O's default `overlay` driver is unsupported. `StopContainer` asks `containers/storage` to unmount the rootfs before CRI-O invokes OCI `delete`. The overlay driver's lazy unmount detaches PermaBox's top mount and leaves CRI-O's original mount in place, so replacing the mountpoint fails with `EBUSY`. VFS returns a directory and its stop-time `Put` is a no-op. OCI `delete` can therefore clean up PermaBox's overlay before storage removes that directory. PermaBox rejects selected CRI-O workloads whose OCI rootfs does not use the VFS layout.
 
@@ -27,6 +27,10 @@ CRI-O's default `overlay` driver is unsupported. `StopContainer` asks `container
 ```
 
 Use the [shared rootfs verification steps](../README.md#4-verify-that-file-changes-survive-pod-recreation). They check that a replacement Pod on the same node and image retains a newly created file, an edited image file, and deletion of an image file. If the Pod fails, inspect its events, the CRI-O service log, and `/var/log/permabox.log` on the selected node. Use only trusted workloads and a clean namespace/Pod identity for the first test.
+
+## Enable StatefulSet reclamation
+
+For Kubernetes-aware reclamation, install the [workload metadata bridge](../kubernetes/workload-bridge.yaml) on the same selected node. On that node, create `/opt/permabox` with owner `root` and mode `0700`. The bridge manifest selects `permabox.io.node-restriction.kubernetes.io/pinned=true`; label the selected node accordingly or adapt the manifest's selector for a mixed-runtime cluster. Wait for the bridge DaemonSet to be ready before enabling the policies. Set `workload_socket: /opt/permabox/workload.sock` in the PermaBox configuration, then enable `gc_on_workload_delete`, `gc_on_scale_to_zero` or `gc_workload_annotations` as needed. Configure the periodic `permabox gc` task described in the [shared deployment guide](../README.md) to retry reclamation when cleanup or metadata is temporarily unavailable. Deleting a Pod while its StatefulSet still wants that replica retains its write layer.
 
 ## Upstream behavior checked
 

@@ -1,0 +1,50 @@
+name: Compatibility / CRI-O
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  crio:
+    name: Kubernetes 1.34.0 / CRI-O 1.34.0 / VFS / runc
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+      - name: Build PermaBox
+        run: make build
+      - name: Download and verify pinned upstream binaries
+        working-directory: ${{ runner.temp }}
+        run: |
+          mkdir crio-assets
+          cd crio-assets
+          fetch() { curl --fail --silent --show-error --location --retry 3 --max-time 180 --output "$1" "$2"; }
+          bundle=cri-o.amd64.v1.34.0.tar.gz
+          fetch "$bundle" "https://storage.googleapis.com/cri-o/artifacts/$bundle"
+          for bin in kubeadm kubelet kubectl; do
+            fetch "$bin" "https://dl.k8s.io/release/v1.34.0/bin/linux/amd64/$bin"
+          done
+          sha256sum --strict --check <<'EOF'
+          5a8bc5c3b8072cb9bde1cf025d5597f75bf21018712c5b72d5cb0657948595c8  cri-o.amd64.v1.34.0.tar.gz
+          aecc23726768d1753fd417f6e7395cb1a350373295e8e9d9f80e95ed3618e38e  kubeadm
+          5c0d28cea2a3a5c91861dda088a29d56c1b027e184dae1d792686f0710750076  kubelet
+          cfda68cba5848bc3b6c6135ae2f20ba2c78de20059f68789c090166d6abc3e2c  kubectl
+          EOF
+          tar -xzf "$bundle"
+          chmod 0755 kubeadm kubelet kubectl
+      - name: Install node prerequisites
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends conntrack socat
+      - name: Verify StatefulSet persistence and reclamation
+        run: bash deploy/crio/smoke_test.sh "$RUNNER_TEMP/crio-assets"

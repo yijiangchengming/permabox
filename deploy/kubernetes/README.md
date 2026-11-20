@@ -11,7 +11,7 @@ PermaBox uses Kubernetes `RuntimeClass` (`node.k8s.io/v1`) to select a node's CR
 | RKE2 with embedded containerd | Distribution-specific registration below | Single-node `v1.37.2+rke2r1` with runc in [CI](../../.github/workflows/compat-rke2.yml). |
 | k0s with embedded containerd | Distribution-specific registration below | [CI](../../.github/workflows/compat-k0s.yml) targets single-node `v1.36.4+k0s.1` with runc. |
 | MicroK8s with containerd | Distribution-specific registration below | Manual integration; no end-to-end test. |
-| CRI-O with VFS | [Dedicated node setup](../crio/README.md) | CRI-O 1.34.0, conmon 2.1.13 and runc 1.3.1 tested through CRI; no Kubernetes end-to-end test. The default overlay driver is unsupported. |
+| CRI-O with VFS | [Dedicated node setup](../crio/README.md) | [Compatibility workflow](../../.github/workflows/compat-crio.yml): Kubernetes 1.34.0, CRI-O 1.34.0, conmon 2.1.13 and runc 1.3.1. The default overlay driver is unsupported. |
 | Managed Kubernetes | Manual registration on Linux node pools that permit custom CRI handlers and node configuration | Validate against the exact node image. Restricted and serverless pools are outside the supported installation model. |
 
 Kubernetes versions outside the CI matrix are unverified. A working Kubernetes/runtime combination must also meet the upstream Kubernetes CRI and version requirements. Containerd configuration v2/v3 refers to the TOML format, not the Kubernetes version or the containerd major version.

@@ -25,7 +25,10 @@ gc_removed() { gc && removed; }
 smoke_lifecycle() {
   local slot=/var/lib/permabox/storage/$ns/$pod original
   k label node "$node" permabox.io.node-restriction.kubernetes.io/pinned=true
-  k apply -f deploy/runtimeclass.yaml
+  if [[ -n ${runtime_class_node_label:-} ]]; then
+    k label node "$node" "$runtime_class_node_label=true"
+  fi
+  k apply -f "${runtime_class_manifest:-deploy/runtimeclass.yaml}"
   k create namespace "$ns"
   k apply -f deploy/kubernetes/workload-bridge.yaml
   k -n permabox-system rollout status daemonset/permabox-workload-bridge --timeout=120s
@@ -36,13 +39,13 @@ smoke_lifecycle() {
   wait_for new_pod ''
   ready
   original=$(uid)
-  app exec "$pod" -c demo -- sh -ec 'test -f /etc/inittab; rm /etc/inittab; echo persisted > /permabox-marker'
+  app exec "$pod" -c demo -- sh -ec 'test -f /etc/inittab; rm /etc/inittab; echo permabox >> /etc/alpine-release; echo persisted > /permabox-marker'
   node_exec test -f "$slot/upper/permabox-marker"
   app delete pod "$pod" --wait=false
   wait_for new_pod "$original"
   ready
   # shellcheck disable=SC2016
-  app exec "$pod" -c demo -- sh -ec 'test ! -e /etc/inittab; test "$(cat /permabox-marker)" = persisted'
+  app exec "$pod" -c demo -- sh -ec 'test ! -e /etc/inittab; grep -Fxq permabox /etc/alpine-release; test "$(cat /permabox-marker)" = persisted'
 
   app patch statefulset permabox-demo --type=merge -p '{"spec":{"template":{"metadata":{"annotations":{"permabox.io/gc-on-scale-to-zero":"false"}}}}}'
   app rollout status statefulset/permabox-demo --timeout=120s
@@ -64,7 +67,7 @@ smoke_lifecycle() {
   app scale statefulset permabox-demo --replicas=1
   wait_for new_pod ''
   ready
-  app exec "$pod" -c demo -- sh -ec 'test -f /etc/inittab; test ! -e /permabox-marker'
+  app exec "$pod" -c demo -- sh -ec 'test -f /etc/inittab; ! grep -Fxq permabox /etc/alpine-release; test ! -e /permabox-marker'
   node_exec test -d "$slot/upper"
   app delete statefulset permabox-demo --cascade=foreground --wait=false
   wait_for stopped
