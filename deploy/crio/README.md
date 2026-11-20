@@ -21,7 +21,7 @@ CRI-O's default `overlay` driver is unsupported. `StopContainer` asks `container
   test "$(kubectl get nodes -l "$label=true" -o name)" = "node/$node"
   kubectl apply -f deploy/crio/runtimeclass.yaml
   kubectl create namespace permabox-demo
-  kubectl -n permabox-demo apply -k deploy/crio/example
+  kubectl -n permabox-demo apply -k examples/crio
   kubectl -n permabox-demo rollout status statefulset/permabox-demo --timeout=180s
 )
 ```

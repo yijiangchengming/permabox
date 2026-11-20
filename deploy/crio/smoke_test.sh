@@ -10,7 +10,7 @@ pod=permabox-demo-0
 runtime_class_manifest=deploy/crio/runtimeclass.yaml
 runtime_class_node_label=permabox.io.node-restriction.kubernetes.io/crio-vfs
 bridge_node_label=permabox.io.node-restriction.kubernetes.io/crio-gc
-example_overlay=deploy/crio/example
+example_overlay=examples/crio
 kubeconfig=/etc/kubernetes/admin.conf
 node_exec() { sudo -n "$@"; }
 k() { node_exec "$assets/kubectl" --kubeconfig "$kubeconfig" --request-timeout=10s "$@"; }
