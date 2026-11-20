@@ -24,7 +24,7 @@ gc_removed() { gc && removed; }
 
 smoke_lifecycle() {
   local slot=/var/lib/permabox/storage/$ns/$pod original
-  k label node "$node" permabox.io.node-restriction.kubernetes.io/pinned=true
+  k label node "$node" "${bridge_node_label:-permabox.io.node-restriction.kubernetes.io/pinned}=true"
   if [[ -n ${runtime_class_node_label:-} ]]; then
     k label node "$node" "$runtime_class_node_label=true"
   fi
@@ -33,7 +33,11 @@ smoke_lifecycle() {
   k apply -f deploy/kubernetes/workload-bridge.yaml
   k -n permabox-system rollout status daemonset/permabox-workload-bridge --timeout=120s
 
-  app apply -f deploy/statefulset.yaml
+  if [[ -n ${example_overlay:-} ]]; then
+    app apply -k "$example_overlay"
+  else
+    app apply -f deploy/statefulset.yaml
+  fi
   app patch statefulset permabox-demo --type=merge -p '{"spec":{"template":{"spec":{"terminationGracePeriodSeconds":1}}}}'
   app rollout status statefulset/permabox-demo --timeout=120s
   wait_for new_pod ''

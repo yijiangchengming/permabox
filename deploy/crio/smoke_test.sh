@@ -9,6 +9,8 @@ ns=permabox-demo
 pod=permabox-demo-0
 runtime_class_manifest=deploy/crio/runtimeclass.yaml
 runtime_class_node_label=permabox.io.node-restriction.kubernetes.io/crio-vfs
+bridge_node_label=permabox.io.node-restriction.kubernetes.io/crio-gc
+example_overlay=deploy/crio/example
 kubeconfig=/etc/kubernetes/admin.conf
 node_exec() { sudo -n "$@"; }
 k() { node_exec "$assets/kubectl" --kubeconfig "$kubeconfig" --request-timeout=10s "$@"; }
@@ -123,4 +125,46 @@ node_exec "$assets/kubeadm" init --kubernetes-version=v1.34.0 --cri-socket="$soc
 node=permabox-ci
 k taint node "$node" node-role.kubernetes.io/control-plane-
 k wait --for=condition=Ready "node/$node" --timeout=180s
+# Both RuntimeClasses must be able to exist without sharing a node selector.
+k apply -f deploy/runtimeclass.yaml
 smoke_lifecycle
+[[ $(k get runtimeclass permabox -o json | jq -r '.scheduling.nodeSelector["permabox.io.node-restriction.kubernetes.io/pinned"]') == true ]]
+
+replica_slot() { printf '/var/lib/permabox/storage/%s/permabox-demo-%s\n' "$ns" "$1"; }
+expect_marker() {
+  app exec "permabox-demo-$1" -c demo -- grep -Fx "replica-$1" /etc/permabox-marker
+}
+app apply -k "$example_overlay"
+app patch statefulset permabox-demo --type=merge -p '{"spec":{"replicas":2,"template":{"spec":{"terminationGracePeriodSeconds":1}}}}'
+app rollout status statefulset/permabox-demo --timeout=180s
+for ordinal in 0 1; do
+  # shellcheck disable=SC2016
+  app exec "permabox-demo-$ordinal" -c demo -- sh -ec '
+    test ! -e /etc/permabox-marker
+    printf "%s\n" "$1" >/etc/permabox-marker
+  ' sh "replica-$ordinal"
+  expect_marker "$ordinal"
+done
+
+app scale statefulset permabox-demo --replicas=1
+pod=permabox-demo-1
+slot=$(replica_slot 1)
+wait_for stopped
+wait_for node_exec test -f "$slot/.permabox-released.json"
+gc
+node_exec grep -Fx replica-1 "$slot/upper/etc/permabox-marker"
+expect_marker 0
+
+app scale statefulset permabox-demo --replicas=2
+wait_for new_pod ''
+ready
+expect_marker 1
+expect_marker 0
+
+app scale statefulset permabox-demo --replicas=0
+for ordinal in 1 0; do
+  pod=permabox-demo-$ordinal
+  slot=$(replica_slot "$ordinal")
+  wait_for stopped
+  wait_for gc_removed
+done

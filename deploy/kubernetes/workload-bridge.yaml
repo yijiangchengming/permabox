@@ -51,7 +51,18 @@ spec:
       serviceAccountName: permabox-workload-bridge
       nodeSelector:
         kubernetes.io/os: linux
-        permabox.io.node-restriction.kubernetes.io/pinned: "true"
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: permabox.io.node-restriction.kubernetes.io/pinned
+                    operator: In
+                    values: ["true"]
+              - matchExpressions:
+                  - key: permabox.io.node-restriction.kubernetes.io/crio-gc
+                    operator: In
+                    values: ["true"]
       securityContext:
         seccompProfile:
           type: RuntimeDefault

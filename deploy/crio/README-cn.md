@@ -8,9 +8,13 @@ CRI-O 默认的 `overlay` 驱动不支持持久化：CRI-O 会在 OCI `delete` �
 
 1. 在节点安装 `/usr/local/bin/permabox` 和 [`/etc/permabox/config.yaml`](../config.yaml)。将 `underlying_runtime` 指向实际的 `runc`，写层放在 CRI-O 存储目录之外的本地文件系统。首次验证时保持回收策略关闭。
 2. 将 [99-permabox-vfs.conf](99-permabox-vfs.conf) 安装到 `/etc/crio/crio.conf.d/`。确认没有命令行参数、后续配置和 overlay 专用选项覆盖 VFS 设置。检查配置后，在维护窗口重启 CRI-O，并用 `crictl info` 检查 kubelet 实际连接的 CRI 端点。
-3. 只在目标节点设置 `permabox.io.node-restriction.kubernetes.io/crio-vfs=true`，应用 [RuntimeClass](runtimeclass.yaml)。它与 containerd 的示例使用相同名称；请在独立测试集群中验证，避免覆盖正在使用的对象。
-4. 在 `permabox-demo` 命名空间应用 [`deploy/statefulset.yaml`](../statefulset.yaml)，按[根文件系统持久化验证步骤](../README-cn.md)重建 Pod 并检查文件。
+3. 只在目标节点设置 `permabox.io.node-restriction.kubernetes.io/crio-vfs=true`，应用 [RuntimeClass](runtimeclass.yaml)。CRI-O 工作负载使用 `runtimeClassName: permabox-crio`，底层 handler 仍叫 `permabox`。CRI-O 和 containerd 的 RuntimeClass 可以共存，并选择不同的节点。
+4. 创建 `permabox-demo` 命名空间，运行 `kubectl -n permabox-demo apply -k deploy/crio/example`，按[根文件系统持久化验证步骤](../README-cn.md)重建 Pod 并检查文件。
+
+从旧版的 CRI-O `permabox` RuntimeClass 升级时，先创建 `permabox-crio`，再更新 StatefulSet 的 Pod 模板。保留旧 RuntimeClass 直到相关 Pod 滚动完成，确认没有其他用户后再删除或改作他用。保持节点、命名空间和 StatefulSet 名称不变，即可复用各副本原有的写层。
 
 ## 启用 StatefulSet 回收
 
-在选中的 CRI-O 节点创建 `/opt/permabox`，所有者为 `root`，权限为 `0700`，然后部署[工作负载元数据桥接](../kubernetes/workload-bridge.yaml)。桥接清单使用 `permabox.io.node-restriction.kubernetes.io/pinned=true` 选择节点；请为该节点添加此标签，或在混用多种运行时的集群中调整清单的节点选择器。等待桥接 DaemonSet 就绪后，在 PermaBox 配置中设置 `workload_socket: /opt/permabox/workload.sock`，按需启用 `gc_on_workload_delete`、`gc_on_scale_to_zero` 或 `gc_workload_annotations`。按[通用部署指南](../README-cn.md)设置定期执行 `permabox gc`，以便临时无法清理或获取元数据时重试。仅删除 Pod 且 StatefulSet 仍需要该副本时，写层会保留。
+在选中的 CRI-O 节点创建 `/opt/permabox`，所有者为 `root`，权限为 `0700`。为节点加上 `permabox.io.node-restriction.kubernetes.io/crio-gc=true`，再部署[工作负载元数据桥接](../kubernetes/workload-bridge.yaml)。如果此前只为桥接设置了通用 `pinned` 标签，设置新标签后即可移除它；`pinned` 也用于 containerd RuntimeClass 的调度。等待桥接 DaemonSet 就绪后，在 PermaBox 配置中设置 `workload_socket: /opt/permabox/workload.sock`，按需启用 `gc_on_workload_delete`、`gc_on_scale_to_zero` 或 `gc_workload_annotations`。按[通用部署指南](../README-cn.md)设置定期执行 `permabox gc`，以便临时无法清理或获取元数据时重试。
+
+StatefulSet 的每个序号都有独立的写层。从两个副本缩到一个时，被缩掉的副本保留写层；该序号在同一节点恢复后可以复用。启用 `gc_on_scale_to_zero` 后，将整个 StatefulSet 缩到零会回收它已释放的所有写层。
