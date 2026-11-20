@@ -125,8 +125,25 @@ rollback_transaction() {
       rm -f "$install_host/$asset" || return 1
     fi
   done
-  if [[ -e $txn/restart ]]; then service_cmd --no-block restart "$restore_unit" || return 1; fi
+  sync -f "$dir" && sync -f "$install_host" || return 1
+  if [[ -e $txn/restart ]]; then
+    service_cmd restart "$restore_unit" || return 1
+    local deadline=$((SECONDS + ${RESTART_TIMEOUT:-180})) restored_info handler
+    while (( SECONDS < deadline )); do
+      if restored_info=$(get_info 2>/dev/null) && handler=$(handler_state "$restored_info") &&
+          [[ $handler == "$(<"$txn/previous-handler")" ]]; then
+        finish_transaction "$txn"
+        return
+      fi
+      sleep 2
+    done
+    return 1
+  fi
   finish_transaction "$txn"
+}
+
+handler_state() {
+  jq -cS '.config.containerd.runtimes.permabox // null' <<<"$1"
 }
 
 finish_transaction() {
@@ -222,7 +239,6 @@ reconcile() (
     [[ $path =~ ^(/[A-Za-z0-9_.-]+)+$ && /$path/ != */../* && /$path/ != */./* ]] || { fail "invalid host path: $path"; return 1; }
   done
   [[ ${OWNER:-} =~ ^[a-z0-9.-]+/[a-z0-9.-]+$ && $annotation =~ ^[A-Za-z0-9./_-]+$ ]] || { fail 'invalid release owner or annotation'; return 1; }
-  [[ -s $dir/config.toml ]] || { fail 'K3s embedded containerd configuration not found'; return 1; }
   [[ ! -L $install_host ]] || { fail 'install directory cannot be a symlink'; return 1; }
   mkdir -p "$install_host" || return 1
   local lock info plugin version tmpdir candidate stem old=0 configured=0 status
@@ -230,10 +246,11 @@ reconcile() (
   if [[ -f $install_host/owner && $(<"$install_host/owner") != "$OWNER" ]]; then
     fail 'runtime is owned by another Helm release'; return 1
   fi
+  rollback_transaction || { fail 'could not recover interrupted node configuration'; return 1; }
+  [[ -s $dir/config.toml ]] || { fail 'K3s embedded containerd configuration not found'; return 1; }
   info=$(get_info) || { fail 'could not read live K3s CRI configuration'; return 1; }
   if has_handler "$info"; then
     configured=1
-  rollback_transaction || { fail 'could not recover interrupted node configuration'; return 1; }
     if [[ ! -f $install_host/owner ]] || ! our_handler "$info"; then
       fail 'runtime handler permabox exists outside this Helm installer'; return 1
     fi
@@ -268,6 +285,7 @@ reconcile() (
   mkdir "$staged_txn" || return 1
   printf '%s\n' "$stem" >"$staged_txn/template-name" && printf '%s\n' "$unit" >"$staged_txn/service" || return 1
   printf '%s\n' "$data_dir" >"$staged_txn/k3s-data-dir" || return 1
+  handler_state "$info" >"$staged_txn/previous-handler" || return 1
   if [[ -f $template ]]; then
     old=1
     cp -p "$template" "$staged_txn/template" && chmod --reference="$template" "$candidate" || return 1

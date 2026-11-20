@@ -357,13 +357,6 @@ func (m Manager) CleanupSlot(id string) (string, error) {
 }
 
 func (m Manager) releaseLocked(id string, state record, now time.Time) error {
-	if state.Started {
-		if err := m.commitOwnership(id, state); err != nil {
-			return err
-		}
-		state.Started = false
-		state.PendingOwner = nil
-	}
 	if state.ReleasedAt.IsZero() {
 		state.ReleasedAt = now
 		if err := writeRecord(m.journal(id), state); err != nil {
@@ -437,6 +430,9 @@ func (m Manager) cleanupLockedAt(id string, state record, now time.Time) error {
 		return err
 	}
 	if !now.IsZero() {
+		if err := m.commitOwnership(id, state); err != nil {
+			return err
+		}
 		owned, err := ownedSlot(state.Slot)
 		if err != nil {
 			return err

@@ -123,14 +123,6 @@ func (m Manager) sweepLocked(roots []string, target string, ttl time.Duration, n
 			result = errors.Join(result, fmt.Errorf("inspect %s: %w", file.Name(), err))
 			continue
 		}
-		if state.Started && state.Namespace == ns {
-			if err := m.commitOwnership(id, state); err != nil {
-				result = errors.Join(result, fmt.Errorf("retry ownership for %s: %w", id, err))
-				live = append(live, state)
-				continue
-			}
-			state.Started, state.PendingOwner = false, nil
-		}
 		terminal := !state.ReleasedAt.IsZero()
 		if target == "" && state.Namespace == ns && (terminal ||
 			(now.Sub(info.ModTime()) >= staleAge && staleRoot(state.Root, mounts))) {
@@ -144,6 +136,8 @@ func (m Manager) sweepLocked(roots []string, target string, ttl time.Duration, n
 				continue
 			}
 			result = errors.Join(result, fmt.Errorf("clean up %s: %w", id, err))
+		} else if state.Started && state.Namespace == ns {
+			result = errors.Join(result, m.commitOwnership(id, state))
 		}
 		live = append(live, state)
 	}

@@ -71,6 +71,7 @@ spec:
           image: docker.io/library/alpine:3.22
           command: ["/permabox", "serve-workloads", "/state/workload.sock"]
           readinessProbe:
+            timeoutSeconds: 5
             exec:
               command: ["/permabox", "check-workload-bridge", "/state/workload.sock"]
           securityContext:
