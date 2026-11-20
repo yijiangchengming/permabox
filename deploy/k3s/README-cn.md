@@ -37,9 +37,11 @@ helm upgrade --install permabox ./deploy/helm/permabox \
   --set-string image.repository="$IMAGE_REPO" \
   --set-string image.tag="$IMAGE_TAG" \
   --set-string 'nodeSelector.kubernetes\.io/hostname'="$NODE_HOSTNAME" \
+  --set 'trustedNamespaces={permabox-demo}' \
   --wait --timeout 10m
 
 kubectl -n permabox-system rollout status daemonset/permabox-installer --timeout=5m
+kubectl -n permabox-system rollout status daemonset/permabox-bridge --timeout=5m
 kubectl -n permabox-system get daemonset permabox-installer
 ```
 
@@ -56,10 +58,13 @@ Chart 将同一套 `nodeSelector` 和 `tolerations` 应用于安装器和 Runtim
 | `underlyingRuntime` | 使用 K3s 自带的 `<dataDir>/data/current/bin/runc` |
 | `storageRoot` | `/var/lib/permabox/storage` |
 | `storageRoots` | `{}`；存储别名到节点本地绝对路径的映射 |
+| `trustedNamespaces` | `[]`；显式允许使用持久化的命名空间，升级时也需要配置 |
+| `bridgeImage` | `{}`；默认沿用安装器镜像。设置 `bridgeImage.tag`，并按需设置 `bridgeImage.repository` 和 `bridgeImage.pullPolicy`，可独立固定已验证的桥接镜像 |
+| `allowLegacyWrapperMigration` | `false`；使用旧包装器的节点须先停止所有 PermaBox 工作负载，再在安装模式下一次性启用此项 |
 | `underlyingRuntimes` | `{}`；运行时别名到宿主机绝对二进制路径的映射 |
 | `gcIdleTTL` | `"0s"`；Go 时长，默认保留已释放的持久化数据，GC 仍重试残留清理 |
-| `gcOnWorkloadDelete` | `false`；设为 `true` 后，删除 Deployment 或 StatefulSet 时回收其已安全释放的写层 |
-| `gcOnScaleToZero` | `false`；设为 `true` 后，Deployment 或 StatefulSet 的 `spec.replicas` 为 `0` 时回收其已安全释放的写层 |
+| `gcOnWorkloadDelete` | `false`；设为 `true` 后，删除 StatefulSet 时回收其已安全释放的写层 |
+| `gcOnScaleToZero` | `false`；设为 `true` 后，StatefulSet 的 `spec.replicas` 为 `0` 时回收其已安全释放的写层 |
 | `gcWorkloadAnnotations` | `false`；设为 `true` 后，允许 Pod 模板注解单独覆盖上面两项默认值 |
 | `gcIntervalSeconds` | `60`；每次 GC 前等待的秒数（正整数） |
 | `persistAnnotation` | `permabox.io/persist`；更改后须同步修改业务 Pod |
@@ -68,13 +73,19 @@ Chart 将同一套 `nodeSelector` 和 `tolerations` 应用于安装器和 Runtim
 
 安装器通过 `permabox validate-config` 验证暂存的配置，验证成功后才发布。默认运行时和别名均不得指向安装器包装器 `/opt/permabox-k3s/runtime`，否则会递归调用 PermaBox。
 
-两项工作负载回收策略可独立开启，例如 Helm 的 `--set gcOnWorkloadDelete=true --set gcOnScaleToZero=true`。开启后，Helm 为安装器创建只读权限；宿主机无需配置 kubeconfig。容器卸载完成且 API 已确认满足条件时，立即尝试回收。宿主机定期 GC 会补查此前已释放或尚未确认的写层，通常在下一轮完成，默认每轮间隔 60 秒。两项策略都无需等待 `gcIdleTTL`；TTL 仍独立生效。
+安装器会先确认元数据桥接可用，并检查现有写层是否有可核验的 StatefulSet 身份，再发布升级。若发现旧写层问题，请处理后重试。CRI handler 切换失败时会恢复事务记录的原状态；请预留时间让 K3s 重启并恢复原 handler。
 
-手动删除 Pod、滚动更新和缩容到非零副本数不会单独触发这两项策略。缩到 0 后，需保持零副本直到写层释放并通过回收检查；如果很快恢复副本，短暂的零副本状态可能未被观察到。只有启用后成功识别工作负载归属并进入启动阶段的容器写层才受这两项策略管理。回收保护规则见[定期回收](../README-cn.md#定期回收gc)。
+元数据桥接由独立的 DaemonSet 运行。安装器 Pod 替换或主机端事务回滚时，桥接仍可用。迁移时沿用原 socket，新桥接会等待旧进程释放锁。若原包装器没有创建准入锁，请停止所有 PermaBox Pod，并阻止控制器创建替代 Pod。以安装模式设置 `--set allowLegacyWrapperMigration=true`，确认升级就绪后再恢复业务或切换到卸载模式。新准入锁无法跟踪迁移前已启动的创建操作。承载 PermaBox 工作负载的节点不应通过 Helm 回退到会移除独立桥接的旧 Chart。默认共用镜像时，镜像故障可能同时影响两个 DaemonSet，滚动替换桥接也可能短暂阻塞新建持久化容器。可独立固定 `bridgeImage`，避免常规安装器镜像升级重启桥接。
+
+两项工作负载回收策略仅适用于 StatefulSet，可独立开启，例如 Helm 的 `--set gcOnWorkloadDelete=true --set gcOnScaleToZero=true`。已释放的写层由下一轮周期任务检查，默认间隔 60 秒，可通过 `gcIntervalSeconds` 调整。两项策略都无需等待 `gcIdleTTL`。即使关闭回收，Helm 也会启动只读元数据桥接以核验 StatefulSet UID。升级前请参考[旧写层迁移说明](../README-cn.md)。
+
+旧版本中由 Deployment 留下的写层，在释放后仍可通过 `gcIdleTTL` 回收。
+
+手动删除 Pod、滚动更新和缩容到非零副本数不会单独触发这两项策略。删除 StatefulSet 可在下一次符合条件的扫描回收；缩到 0 则需至少等待首次批准一分钟，并由后续扫描再次确认。两项策略只处理已释放且归属已确认的写层。回收保护规则见[定期回收](../README-cn.md#定期回收gc)。
 
 ### 按工作负载覆盖回收策略
 
-通过 Helm 传入 `--set gcWorkloadAnnotations=true` 后，在 Deployment 或 StatefulSet 的 Pod 模板中按需设置注解。即使两个全局默认值均为 `false`，也可以只为指定工作负载开启：
+通过 Helm 传入 `--set gcWorkloadAnnotations=true` 后，在 StatefulSet 的 Pod 模板中按需设置注解。即使两个全局默认值均为 `false`，也可以只为指定工作负载开启：
 
 ```yaml
 spec:
@@ -103,6 +114,6 @@ kubectl -n permabox-system get daemonset permabox-installer
 helm uninstall permabox --namespace permabox-system
 ```
 
-卸载模式不执行 GC；它移除运行时注册和安装器管理的二进制、配置，并保留存储根目录和持久化数据。节点离线时应待其恢复后确认清理结果。
+卸载模式会关闭新建容器的准入，等待已开始的创建操作完成，同时允许继续删除容器。若仍有运行时记录，或主机事务回滚并恢复了 handler，准入继续关闭，桥接继续运行。删除剩余工作负载后重试卸载模式；如需取消清理，则成功执行一次安装模式以重新开放准入。确认主机端清理完成后，再通过 Helm 卸载桥接。卸载模式不执行 GC，保留存储根目录和持久化数据。节点离线时应待其恢复后确认清理结果。
 
 部署模式参考 [Sysbox Kubernetes DaemonSet](https://github.com/nestybox/sysbox/blob/master/docs/user-guide/install-k8s.md) 和 [Kata Deploy](https://github.com/kata-containers/kata-containers/tree/main/tools/packaging/kata-deploy)。模板行为参见 [K3s containerd 配置文档](https://docs.k3s.io/advanced#configuring-containerd)。

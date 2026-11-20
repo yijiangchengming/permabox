@@ -37,6 +37,7 @@ func set(values ...string) map[string]bool {
 
 var idPattern = regexp.MustCompile(`^[A-Za-z0-9_+.-]{1,240}$`)
 var podPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$`)
+var crioVFSLayer = regexp.MustCompile(`^[a-f0-9]{64}$`)
 
 func ValidID(id string) bool {
 	return idPattern.MatchString(id) && id != "." && id != ".."
@@ -160,17 +161,30 @@ func InspectBundle(bundle, annotation string) (BundleOptions, error) {
 		return options, fmt.Errorf("decode OCI config: %w", err)
 	}
 	a := spec.Annotations
-	name := a["io.kubernetes.cri.container-name"]
-	if a["io.kubernetes.cri.container-type"] == "sandbox" {
+	crioType := a["io.kubernetes.cri-o.ContainerType"]
+	if crioType == "sandbox" || a["io.kubernetes.cri.container-type"] == "sandbox" {
 		return options, nil
+	}
+	name := a["io.kubernetes.cri.container-name"]
+	if crioType == "container" {
+		name = a["io.kubernetes.container.name"]
 	}
 	options.RuntimeAlias = a[RuntimeAnnotation]
 	if a[annotation] != "true" || (a["permabox.io/container"] != "" && a["permabox.io/container"] != name) {
 		return options, nil
 	}
-	ns, pod := a["io.kubernetes.cri.sandbox-namespace"], a["io.kubernetes.cri.sandbox-name"]
-	if ns == "" && pod == "" {
+	ns, pod, uid := a["io.kubernetes.cri.sandbox-namespace"], a["io.kubernetes.cri.sandbox-name"], a["io.kubernetes.cri.sandbox-uid"]
+	if crioType == "container" || (ns == "" && pod == "") {
 		ns, pod = a["io.kubernetes.pod.namespace"], a["io.kubernetes.pod.name"]
+	}
+	if crioType == "container" {
+		uid = a["io.kubernetes.pod.uid"]
+		if name == "" {
+			return options, invalidPersistence{errors.New("CRI-O persistence requires the Kubernetes container name label")}
+		}
+		if !isCRIOVFSRoot(spec.Root.Path) {
+			return options, invalidPersistence{errors.New("CRI-O persistence requires a containers/storage VFS rootfs")}
+		}
 	}
 	if !podPattern.MatchString(ns) || !podPattern.MatchString(pod) {
 		return options, invalidPersistence{errors.New("persistence requires valid Pod namespace and name annotations")}
@@ -186,7 +200,15 @@ func InspectBundle(bundle, annotation string) (BundleOptions, error) {
 	if err != nil {
 		return options, invalidPersistence{err}
 	}
-	options.Persistence = &Bundle{root, ns, pod, name, a["io.kubernetes.cri.sandbox-uid"]}
+	options.Persistence = &Bundle{root, ns, pod, name, uid}
 	options.StorageAlias = a[StorageRootAnnotation]
 	return options, nil
+}
+
+func isCRIOVFSRoot(root string) bool {
+	parent := filepath.Dir(root)
+	// Only VFS leaves the graph driver's rootfs alone during CRI StopContainer.
+	return filepath.IsAbs(root) && filepath.Clean(root) == root &&
+		filepath.Base(parent) == "dir" && filepath.Base(filepath.Dir(parent)) == "vfs" &&
+		crioVFSLayer.MatchString(filepath.Base(root))
 }

@@ -2,6 +2,7 @@ PermaBox installer mode: {{ .Values.mode }}
 
 Helm can create the release before node changes finish. Check the rollout:
   kubectl -n {{ .Release.Namespace }} rollout status daemonset/{{ include "permabox.installerName" . }}
+  kubectl -n {{ .Release.Namespace }} rollout status daemonset/{{ include "permabox.bridgeName" . }}
   kubectl -n {{ .Release.Namespace }} get daemonset {{ include "permabox.installerName" . }}
 
 Confirm that DESIRED is nonzero and includes every intended node, and that
@@ -13,8 +14,11 @@ exists before the node installer finishes and does not check node readiness.
 
 Before removal, stop PermaBox workloads. Upgrade this same release in the
 same namespace with mode=remove and the same target nodes and K3s settings.
+An older installer must first complete a drained upgrade in install mode
+to migrate its runtime wrapper.
 {{ else }}
-This release omits the RuntimeClass in remove mode. After confirming cleanup
+This release omits the RuntimeClass in remove mode and keeps the metadata
+bridge available until uninstall. After confirming cleanup
 on every previously installed node, uninstall the Helm release:
   helm uninstall {{ .Release.Name }} --namespace {{ .Release.Namespace }}
 {{ end }}

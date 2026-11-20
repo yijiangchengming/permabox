@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/yijiangchengming/permabox/internal/oci"
-	"github.com/yijiangchengming/permabox/internal/workload"
+	"github.com/yijiangchengming/permabox/internal/ownership"
 )
 
 type Manager struct {
@@ -24,13 +24,14 @@ type Manager struct {
 func New(dir string) Manager { return Manager{Dir: dir, sys: linux{}} }
 
 type record struct {
-	Namespace    string          `json:"mount_namespace"`
-	Root         string          `json:"root"`
-	Slot         string          `json:"slot"`
-	LowerID      int             `json:"lower_mount_id,omitempty"`
-	OverlayID    int             `json:"overlay_mount_id,omitempty"`
-	ReleasedAt   time.Time       `json:"released_at,omitempty"`
-	PendingOwner *workload.Owner `json:"pending_workload_owner,omitempty"`
+	Namespace    string           `json:"mount_namespace"`
+	Root         string           `json:"root"`
+	Slot         string           `json:"slot"`
+	LowerID      int              `json:"lower_mount_id,omitempty"`
+	OverlayID    int              `json:"overlay_mount_id,omitempty"`
+	ReleasedAt   time.Time        `json:"released_at,omitempty"`
+	PendingOwner *ownership.Owner `json:"pending_workload_owner,omitempty"`
+	Started      bool             `json:"ownership_commit_pending,omitempty"`
 }
 
 func (r record) MarshalJSON() ([]byte, error) {
@@ -52,10 +53,10 @@ func (m Manager) alias(id string) string   { return filepath.Join(m.Dir, id+".lo
 
 // Prepare returns true only when this call installed a new overlay.
 func (m Manager) Prepare(id, root, slot, container string) (bool, error) {
-	return m.PrepareOwned(id, root, slot, container, workload.Owner{})
+	return m.PrepareOwned(id, root, slot, container, ownership.Owner{})
 }
 
-func (m Manager) PrepareOwned(id, root, slot, container string, owner workload.Owner) (bool, error) {
+func (m Manager) PrepareOwned(id, root, slot, container string, owner ownership.Owner) (bool, error) {
 	if !oci.ValidID(id) {
 		return false, errors.New("invalid container ID")
 	}
@@ -106,6 +107,9 @@ func (m Manager) PrepareOwned(id, root, slot, container string, owner workload.O
 		if !prev.ReleasedAt.IsZero() {
 			return false, errors.New("previous delete still needs cleanup")
 		}
+		if err := bindSlotOwner(slot, owner); err != nil {
+			return false, err
+		}
 		mounts, err := m.sys.mounts()
 		if err != nil {
 			return false, err
@@ -140,22 +144,45 @@ func (m Manager) PrepareOwned(id, root, slot, container string, owner workload.O
 	if _, err := os.Lstat(alias); !errors.Is(err, os.ErrNotExist) {
 		return false, fmt.Errorf("lower mount path is not available: %s", alias)
 	}
+	fresh := false
+	if owner.Valid() {
+		var previous slotUse
+		entries, err := os.ReadDir(slot)
+		if err != nil {
+			return false, err
+		}
+		fresh = len(entries) == 0 || (readMarker(filepath.Join(slot, useMarker), &previous) && previous.Fresh && !previous.Confirmed)
+	}
+	if err := bindSlotOwner(slot, owner); err != nil {
+		return false, err
+	}
 	if err := prepareSlot(slot, container, info); err != nil {
 		return false, err
 	}
 	if err := removeDurable(filepath.Join(slot, releasedMarker)); err != nil {
 		return false, err
 	}
+	if owner.Valid() {
+		if err := beginSlotUse(slot, id, fresh); err != nil {
+			return false, err
+		}
+	}
+	if err := removeDurable(filepath.Join(slot, scaleDownMarker)); err != nil {
+		return false, err
+	}
 	if err := writeRecord(m.journal(id), want); err != nil {
 		return false, err
 	}
 	if err := m.install(id, &want); err != nil {
+		if fresh {
+			return false, errors.Join(err, m.releaseLocked(id, want, time.Now().UTC()))
+		}
 		return false, errors.Join(err, m.cleanupLocked(id, want))
 	}
 	return true, nil
 }
 
-// ActivateOwnership commits the owner once OCI start confirms create was accepted.
+// ActivateOwnership commits the pending owner after the runtime starts successfully.
 func (m Manager) ActivateOwnership(id string) error {
 	if !oci.ValidID(id) {
 		return errors.New("invalid container ID")
@@ -175,17 +202,29 @@ func (m Manager) ActivateOwnership(id string) error {
 	if err != nil {
 		return err
 	}
-	if !state.ReleasedAt.IsZero() || state.PendingOwner == nil {
+	if !state.ReleasedAt.IsZero() || state.PendingOwner == nil || !state.PendingOwner.Valid() {
+		return nil
+	}
+	state.Started = true
+	if err := writeRecord(m.journal(id), state); err != nil {
+		return err
+	}
+	return m.commitOwnership(id, state)
+}
+
+func (m Manager) commitOwnership(id string, state record) error {
+	if !state.Started || state.PendingOwner == nil || !state.PendingOwner.Valid() {
 		return nil
 	}
 	if err := realDir(state.Slot); err != nil {
 		return err
 	}
-	path := filepath.Join(state.Slot, workloadMarker)
-	if state.PendingOwner.Valid() {
-		return writeRecord(path, state.PendingOwner)
+	if err := confirmSlotUse(state.Slot, id, *state.PendingOwner); err != nil {
+		return err
 	}
-	return removeDurable(path)
+	state.Started = false
+	state.PendingOwner = nil
+	return writeRecord(m.journal(id), state)
 }
 
 func (m Manager) install(id string, state *record) error {
@@ -411,6 +450,9 @@ func (m Manager) cleanupLockedAt(id string, state record, now time.Time) error {
 		return err
 	}
 	if !now.IsZero() {
+		if err := m.commitOwnership(id, state); err != nil {
+			return err
+		}
 		owned, err := ownedSlot(state.Slot)
 		if err != nil {
 			return err

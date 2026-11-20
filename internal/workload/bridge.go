@@ -18,11 +18,17 @@ import (
 const DefaultSocket = "/opt/permabox-k3s/workload.sock"
 
 func CheckSocket(path string) error {
-	conn, err := net.DialTimeout("unix", path, time.Second)
+	c := UnixClient(path)
+	c.http.Timeout = 4 * time.Second
+	resp, err := c.request(context.Background(), "/readyz")
 	if err != nil {
 		return err
 	}
-	return conn.Close()
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		return errors.New("workload bridge cannot read Kubernetes metadata")
+	}
+	return nil
 }
 
 func UnixClient(path string) Client {
@@ -80,6 +86,14 @@ func Serve(path string) error {
 	if err != nil {
 		return err
 	}
+	data, err := os.ReadFile(filepath.Join(filepath.Dir(c.tokenPath), "namespace"))
+	if err != nil {
+		return err
+	}
+	namespace := strings.TrimSpace(string(data))
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /readyz", c.readiness(namespace))
+	mux.HandleFunc("/", c.serveMetadata)
 	info, err := os.Lstat(filepath.Dir(path))
 	if err != nil {
 		return err
@@ -113,9 +127,22 @@ func Serve(path string) error {
 	if err := os.Chmod(path, 0600); err != nil {
 		return err
 	}
-	srv := http.Server{Handler: http.HandlerFunc(c.serveMetadata), ReadHeaderTimeout: 2 * time.Second,
-		WriteTimeout: 3 * time.Second, IdleTimeout: 2 * time.Second, MaxHeaderBytes: 4096}
+	srv := http.Server{Handler: mux, ReadHeaderTimeout: 2 * time.Second,
+		WriteTimeout: 4 * time.Second, IdleTimeout: 2 * time.Second, MaxHeaderBytes: 4096}
 	return srv.Serve(listener)
+}
+
+func (c Client) readiness(namespace string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		for _, kind := range []string{"Pod", "StatefulSet"} {
+			// An authoritative NotFound also demonstrates authenticated read access.
+			if _, err := c.get(r.Context(), kind, namespace, "permabox-readiness"); err != nil && !errors.Is(err, errNotFound) {
+				http.Error(w, "Kubernetes metadata unavailable", http.StatusServiceUnavailable)
+				return
+			}
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}
 }
 
 func (c Client) serveMetadata(w http.ResponseWriter, r *http.Request) {
