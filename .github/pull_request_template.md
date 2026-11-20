@@ -1,3 +1,8 @@
+<!--
+Work PR: target dev from a short-lived branch based on upstream dev.
+Promotion PR: target main only from this repository's dev branch. Use a merge commit and keep dev.
+-->
+
 ## Problem and change
 
 <!-- What currently happens, and what changes with this PR? -->
