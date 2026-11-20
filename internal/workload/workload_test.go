@@ -51,7 +51,7 @@ func TestPodAnnotationsOverrideWorkloadDefaults(t *testing.T) {
 
 func TestUnixBridgePreservesAuthoritativeNotFound(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if want := "/apis/apps/v1/namespaces/test/deployments/app"; r.URL.Path != want {
+		if want := "/apis/apps/v1/namespaces/test/statefulsets/app"; r.URL.Path != want {
 			t.Errorf("upstream path = %q; want %q", r.URL.Path, want)
 		}
 		w.WriteHeader(http.StatusNotFound)
@@ -68,25 +68,30 @@ func TestUnixBridgePreservesAuthoritativeNotFound(t *testing.T) {
 	defer server.Close()
 	go server.Serve(listener)
 	client := UnixClient(path)
-	if ok, err := client.Reclaim(context.Background(), Owner{Namespace: "test", Kind: "Deployment", Name: "app", UID: "old-uid"}, true, false); err != nil || !ok {
+	if ok, err := client.Reclaim(context.Background(), Owner{Namespace: "test", Kind: "StatefulSet", Name: "app", UID: "old-uid"}, true, false); err != nil || !ok {
 		t.Fatalf("bridge reclaim = %v, %v", ok, err)
 	}
-	resp, err := client.request(context.Background(), "/api/v1/namespaces/test/secrets/app")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("unsupported resource returned %d", resp.StatusCode)
+	for _, path := range []string{
+		"/api/v1/namespaces/test/secrets/app",
+		"/apis/apps/v1/namespaces/test/deployments/app",
+		"/apis/apps/v1/namespaces/test/replicasets/app",
+	} {
+		resp, err := client.request(context.Background(), path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("unsupported path %s returned %d", path, resp.StatusCode)
+		}
 	}
 }
 
-func TestResolveControllerChain(t *testing.T) {
+func TestResolveStatefulSetOwner(t *testing.T) {
 	for _, tc := range []struct{ name, uid, rsUID, kind string }{
-		{"deployment", "pod-id", "rs-id", "Deployment"},
+		{"replicaset ignored", "pod-id", "rs-id", ""},
 		{"statefulset", "pod-id", "", "StatefulSet"},
 		{"replacement-pod", "old-pod", "rs-id", ""},
-		{"replacement-replicaset", "pod-id", "old-rs", ""},
 		{"standalone", "pod-id", "", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -100,8 +105,6 @@ func TestResolveControllerChain(t *testing.T) {
 						ref = `[{"apiVersion":"apps/v1","kind":"StatefulSet","name":"app","uid":"app-id","controller":true}]`
 					}
 					fmt.Fprintf(w, `{"metadata":{"uid":"pod-id","ownerReferences":%s}}`, ref)
-				case "/apis/apps/v1/namespaces/test/replicasets/rs":
-					fmt.Fprint(w, `{"metadata":{"uid":"rs-id","ownerReferences":[{"apiVersion":"apps/v1","kind":"Deployment","name":"app","uid":"app-id","controller":true}]}}`)
 				default:
 					t.Errorf("unexpected request %s", r.URL.Path)
 				}

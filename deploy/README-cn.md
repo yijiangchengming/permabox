@@ -146,7 +146,7 @@ sudo crictl info
 
 默认 `gc_idle_ttl: "0s"` 保留已释放的持久化数据，周期 GC 仍会重试能够安全确认的残留清理。若设为正的 Go 时长（如 `"72h"`），从最后一次确认写层已释放时开始计算空闲时间；达到时长后，下一次符合条件的 GC 才会删除数据。在到期前，同一节点、同一存储根、同一命名空间和 Pod 名的替换实例仍可恢复原写层。GC 会保留没有生命周期标记的旧数据，直到后续成功使用并释放；对仍活跃、可能仍挂载或状态无法确认的记录和数据会保守跳过。共享存储不受支持。
 
-工作负载删除与缩到 0 的回收默认关闭，推荐直接用 [K3s Helm 安装器](k3s/README-cn.md)启用。手动部署要启用 `gc_on_workload_delete` 或 `gc_on_scale_to_zero`，须在 Kubernetes Pod 内运行 `permabox serve-workloads <socket路径>`，给该 Pod 的 ServiceAccount 授予 Pod、ReplicaSet、Deployment 和 StatefulSet 的 `get` 权限，并将其 socket 放在节点的私有目录（权限 `0700`）。容器内应能访问 API 服务和标准 ServiceAccount 凭证；节点配置 `workload_socket` 为同一个 socket 的宿主机绝对路径。没有该桥接时应保持两项开关关闭。
+StatefulSet 删除与缩到 0 的回收默认关闭，推荐直接用 [K3s Helm 安装器](k3s/README-cn.md)启用。手动部署要启用 `gc_on_workload_delete` 或 `gc_on_scale_to_zero`，须在 Kubernetes Pod 内运行 `permabox serve-workloads <socket路径>`，给该 Pod 的 ServiceAccount 授予 Pod 和 StatefulSet 的 `get` 权限，并将其 socket 放在节点的私有目录（权限 `0700`）。容器内应能访问 API 服务和标准 ServiceAccount 凭证；节点配置 `workload_socket` 为同一个 socket 的宿主机绝对路径。没有该桥接时应保持两项开关关闭。
 
 同一个 API 桥也支持 Pod 模板注解覆盖，节点设置 `gc_workload_annotations: true` 即可启用；[注解示例](k3s/README-cn.md#按工作负载覆盖回收策略)与 Helm 部署相同。
 

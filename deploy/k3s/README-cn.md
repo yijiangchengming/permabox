@@ -58,8 +58,8 @@ Chart 将同一套 `nodeSelector` 和 `tolerations` 应用于安装器和 Runtim
 | `storageRoots` | `{}`；存储别名到节点本地绝对路径的映射 |
 | `underlyingRuntimes` | `{}`；运行时别名到宿主机绝对二进制路径的映射 |
 | `gcIdleTTL` | `"0s"`；Go 时长，默认保留已释放的持久化数据，GC 仍重试残留清理 |
-| `gcOnWorkloadDelete` | `false`；设为 `true` 后，删除 Deployment 或 StatefulSet 时回收其已安全释放的写层 |
-| `gcOnScaleToZero` | `false`；设为 `true` 后，Deployment 或 StatefulSet 的 `spec.replicas` 为 `0` 时回收其已安全释放的写层 |
+| `gcOnWorkloadDelete` | `false`；设为 `true` 后，删除 StatefulSet 时回收其已安全释放的写层 |
+| `gcOnScaleToZero` | `false`；设为 `true` 后，StatefulSet 的 `spec.replicas` 为 `0` 时回收其已安全释放的写层 |
 | `gcWorkloadAnnotations` | `false`；设为 `true` 后，允许 Pod 模板注解单独覆盖上面两项默认值 |
 | `gcIntervalSeconds` | `60`；每次 GC 前等待的秒数（正整数） |
 | `persistAnnotation` | `permabox.io/persist`；更改后须同步修改业务 Pod |
@@ -68,13 +68,15 @@ Chart 将同一套 `nodeSelector` 和 `tolerations` 应用于安装器和 Runtim
 
 安装器通过 `permabox validate-config` 验证暂存的配置，验证成功后才发布。默认运行时和别名均不得指向安装器包装器 `/opt/permabox-k3s/runtime`，否则会递归调用 PermaBox。
 
-两项工作负载回收策略可独立开启，例如 Helm 的 `--set gcOnWorkloadDelete=true --set gcOnScaleToZero=true`。开启后，Helm 为安装器创建只读权限；宿主机无需配置 kubeconfig。容器卸载完成且 API 已确认满足条件时，立即尝试回收。宿主机定期 GC 会补查此前已释放或尚未确认的写层，通常在下一轮完成，默认每轮间隔 60 秒。两项策略都无需等待 `gcIdleTTL`；TTL 仍独立生效。
+两项工作负载回收策略仅适用于 StatefulSet，可独立开启，例如 Helm 的 `--set gcOnWorkloadDelete=true --set gcOnScaleToZero=true`。开启后，Helm 为安装器创建只读权限；宿主机无需配置 kubeconfig。容器卸载完成且 API 已确认满足条件时，立即尝试回收。宿主机定期 GC 会补查此前已释放或尚未确认的写层，通常在下一轮完成，默认每轮间隔 60 秒。两项策略都无需等待 `gcIdleTTL`；TTL 仍独立生效。
+
+旧版本中由 Deployment 留下的写层，在释放后仍可通过 `gcIdleTTL` 回收。
 
 手动删除 Pod、滚动更新和缩容到非零副本数不会单独触发这两项策略。缩到 0 后，需保持零副本直到写层释放并通过回收检查；如果很快恢复副本，短暂的零副本状态可能未被观察到。只有启用后成功识别工作负载归属并进入启动阶段的容器写层才受这两项策略管理。回收保护规则见[定期回收](../README-cn.md#定期回收gc)。
 
 ### 按工作负载覆盖回收策略
 
-通过 Helm 传入 `--set gcWorkloadAnnotations=true` 后，在 Deployment 或 StatefulSet 的 Pod 模板中按需设置注解。即使两个全局默认值均为 `false`，也可以只为指定工作负载开启：
+通过 Helm 传入 `--set gcWorkloadAnnotations=true` 后，在 StatefulSet 的 Pod 模板中按需设置注解。即使两个全局默认值均为 `false`，也可以只为指定工作负载开启：
 
 ```yaml
 spec:

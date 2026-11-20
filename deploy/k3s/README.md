@@ -60,8 +60,8 @@ The chart applies the same `nodeSelector` and `tolerations` to the installer and
 | `storageRoots` | `{}`. Maps storage aliases to absolute paths on the node. |
 | `underlyingRuntimes` | `{}`. Maps runtime aliases to absolute binary paths on the host. |
 | `gcIdleTTL` | `"0s"`. A Go duration; by default, GC retains released data and still retries stale cleanup. |
-| `gcOnWorkloadDelete` | `false`. Enable to reclaim safely released writable layers when their Deployment or StatefulSet is deleted. |
-| `gcOnScaleToZero` | `false`. Enable to reclaim safely released writable layers when their Deployment or StatefulSet has `spec.replicas: 0`. |
+| `gcOnWorkloadDelete` | `false`. Enable to reclaim safely released writable layers when their StatefulSet is deleted. |
+| `gcOnScaleToZero` | `false`. Enable to reclaim safely released writable layers when their StatefulSet has `spec.replicas: 0`. |
 | `gcWorkloadAnnotations` | `false`. Enable to let Pod template annotations override the two workload GC defaults individually. |
 | `gcIntervalSeconds` | `60`. A positive integer giving the wait in seconds before each GC sweep. |
 | `persistAnnotation` | `permabox.io/persist`. Update the workload Pod annotations if you change this key. |
@@ -72,13 +72,15 @@ The installer runs `permabox validate-config` on the staged configuration before
 
 ## Workload garbage collection
 
-Enable either workload GC policy independently, for example with `--set gcOnWorkloadDelete=true --set gcOnScaleToZero=true`. Helm grants the installer read-only API permissions; the host does not need a kubeconfig. PermaBox attempts reclamation as soon as the writable layer is unmounted and the API confirms the policy condition. Periodic host GC revisits released or previously unconfirmed layers, normally on the next sweep. By default, the installer waits 60 seconds before each sweep. Both policies can reclaim data without waiting for `gcIdleTTL`, which applies separately.
+Workload GC policies apply only to StatefulSets. Enable either policy independently, for example with `--set gcOnWorkloadDelete=true --set gcOnScaleToZero=true`. Helm grants the installer read-only API permissions; the host does not need a kubeconfig. PermaBox attempts reclamation as soon as the writable layer is unmounted and the API confirms the policy condition. Periodic host GC revisits released or previously unconfirmed layers, normally on the next sweep. By default, the installer waits 60 seconds before each sweep. Both policies can reclaim data without waiting for `gcIdleTTL`, which applies separately.
+
+Layers left by Deployments from earlier versions can still be reclaimed through `gcIdleTTL` once released.
 
 Deleting a Pod by hand, rolling out an update, or scaling to a nonzero replica count does not by itself trigger either policy. After scaling to zero, leave replicas at zero until the writable layer is released and GC checks it. If you scale back up quickly, GC may not observe the brief zero count. The policies apply only to writable layers whose workload ownership was successfully recorded with the feature enabled and whose containers reached startup. See [periodic garbage collection](../README.md#periodic-garbage-collection) for the safeguards.
 
 ### Override GC per workload
 
-Set `--set gcWorkloadAnnotations=true` in Helm, then add the desired annotations to the Deployment or StatefulSet Pod template. You can enable a policy for an individual workload even when both global defaults are `false`:
+Set `--set gcWorkloadAnnotations=true` in Helm, then add the desired annotations to the StatefulSet Pod template. You can enable a policy for an individual workload even when both global defaults are `false`:
 
 ```yaml
 spec:

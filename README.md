@@ -6,12 +6,14 @@ PermaBox preserves changes to a container's root filesystem across Kubernetes Po
 
 It is intended for workloads with stable Pod names, such as StatefulSets. Persistence is keyed by storage root, namespace, and Pod name, with one persistent container per Pod. PermaBox does not migrate data between nodes, manage mounted volumes, or provide a backup. Use a PersistentVolume when you need Kubernetes to manage application storage explicitly.
 
+Deployment replicas do not have stable Pod names and are unsupported for persistence. Use a StatefulSet when each replica needs to recover its own writable layer.
+
 ## Features
 
 - **Root filesystem persistence:** Preserve additions, changes, and deletions across same-name Pod recreation, including OverlayFS whiteouts.
 - **Runtime and storage selection:** Configure node defaults and named aliases, then select an alias per Pod. PermaBox remembers the underlying runtime for later OCI commands.
 - **K3s installation:** A Helm-managed node installer registers the runtime with embedded containerd. The installer needs host privileges; application Pods do not.
-- **Lifecycle cleanup:** Keep released layers by default, expire them after an optional idle TTL, or reclaim them when a Deployment or StatefulSet is deleted or scaled to zero. The two workload policies can be overridden with Pod template annotations.
+- **Lifecycle cleanup:** Keep released layers by default, expire them after an optional idle TTL, or reclaim them when a StatefulSet is deleted or scaled to zero. The two workload policies can be overridden with Pod template annotations.
 
 ## Deploy
 

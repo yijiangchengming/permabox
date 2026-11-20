@@ -6,12 +6,14 @@ PermaBox 让 Kubernetes Pod 在同一台 Linux 节点上重建后，仍能读取
 
 PermaBox 适用于 Pod 名称稳定的工作负载，例如 StatefulSet。可写层按存储根目录、命名空间和 Pod 名称查找，每个 Pod 支持一个持久化容器。它不会跨节点迁移数据，也不管理独立挂载的卷或提供备份。应用数据需要由 Kubernetes 单独管理时，请使用 PersistentVolume。
 
+Deployment 副本的 Pod 名称不稳定，因此不支持 Deployment 持久化。需要让各副本恢复各自的写层时，请使用 StatefulSet。
+
 ## 功能
 
 - **根文件系统持久化：** 同名 Pod 重建后保留文件新建、修改和删除结果，包括 OverlayFS whiteout。
 - **运行时和存储选择：** 部署时配置默认路径和别名，Pod 可按需选择；后续 OCI 命令沿用容器创建时选定的运行时。
 - **K3s 自动安装：** Helm 部署节点安装器，为 K3s 内置 containerd 注册运行时。安装器需要宿主机权限，业务 Pod 无需特权模式。
-- **数据回收：** 默认保留已释放的写层，可配置空闲 TTL，也可在 Deployment 或 StatefulSet 删除或缩到零副本时回收。两项工作负载回收策略都支持 Pod 模板注解覆盖。
+- **数据回收：** 默认保留已释放的写层，可配置空闲 TTL，也可在 StatefulSet 删除或缩到零副本时回收。两项工作负载回收策略都支持 Pod 模板注解覆盖。
 
 ## 部署
 

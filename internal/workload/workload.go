@@ -57,7 +57,7 @@ var namePattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$`)
 
 func (o Owner) Valid() bool {
 	return namePattern.MatchString(o.Namespace) && namePattern.MatchString(o.Name) && o.UID != "" &&
-		(o.Kind == "Deployment" || o.Kind == "StatefulSet")
+		o.Kind == "StatefulSet"
 }
 
 type reference struct {
@@ -90,7 +90,7 @@ type Client struct {
 var errNotFound = errors.New("Kubernetes object not found")
 
 var collection = map[string]string{
-	"Pod": "pods", "ReplicaSet": "replicasets", "Deployment": "deployments", "StatefulSet": "statefulsets",
+	"Pod": "pods", "StatefulSet": "statefulsets",
 }
 
 func resourcePath(kind, namespace, name string) (string, error) {
@@ -164,27 +164,12 @@ func (c Client) Resolve(ctx context.Context, namespace, pod, uid string) (Owner,
 	if err != nil || obj.Metadata.UID != uid {
 		return Owner{}, err
 	}
-	overrides := readOverrides(obj.Metadata.Annotations)
-	ownedBy := func(ref reference) Owner {
-		return Owner{Namespace: namespace, Kind: ref.Kind, Name: ref.Name, UID: ref.UID, Overrides: overrides}
-	}
 	ref := controller(obj)
-	if ref.Kind == "StatefulSet" {
-		return ownedBy(ref), nil
+	if ref.Kind != "StatefulSet" {
+		return Owner{}, nil
 	}
-	if ref.Kind == "ReplicaSet" {
-		obj, err := c.get(ctx, ref.Kind, namespace, ref.Name)
-		if errors.Is(err, errNotFound) {
-			return Owner{}, nil
-		}
-		if err != nil || obj.Metadata.UID != ref.UID {
-			return Owner{}, err
-		}
-		if ref = controller(obj); ref.Kind == "Deployment" {
-			return ownedBy(ref), nil
-		}
-	}
-	return Owner{}, nil
+	return Owner{Namespace: namespace, Kind: ref.Kind, Name: ref.Name, UID: ref.UID,
+		Overrides: readOverrides(obj.Metadata.Annotations)}, nil
 }
 
 func (c Client) Reclaim(ctx context.Context, owner Owner, onDelete, onZero bool) (bool, error) {
