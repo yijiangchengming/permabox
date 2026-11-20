@@ -7,29 +7,17 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"regexp"
 	"time"
-)
 
-type Owner struct {
-	Namespace string    `json:"namespace"`
-	Kind      string    `json:"kind"`
-	Name      string    `json:"name"`
-	UID       string    `json:"uid"`
-	Overrides Overrides `json:"gc_overrides,omitzero"`
-}
+	"github.com/yijiangchengming/permabox/internal/ownership"
+)
 
 const (
 	deleteAnnotation      = "permabox.io/gc-on-workload-delete"
 	scaleToZeroAnnotation = "permabox.io/gc-on-scale-to-zero"
 )
 
-type Overrides struct {
-	Delete string `json:"delete,omitempty"`
-	Zero   string `json:"zero,omitempty"`
-}
-
-func readOverrides(annotations map[string]string) Overrides {
+func readOverrides(annotations map[string]string) ownership.Overrides {
 	read := func(key string) string {
 		value, exists := annotations[key]
 		if !exists {
@@ -40,10 +28,10 @@ func readOverrides(annotations map[string]string) Overrides {
 		}
 		return "false"
 	}
-	return Overrides{Delete: read(deleteAnnotation), Zero: read(scaleToZeroAnnotation)}
+	return ownership.Overrides{Delete: read(deleteAnnotation), Zero: read(scaleToZeroAnnotation)}
 }
 
-func (o Overrides) Apply(onDelete, onZero bool) (bool, bool) {
+func ApplyOverrides(o ownership.Overrides, onDelete, onZero bool) (bool, bool) {
 	if o.Delete != "" {
 		onDelete = o.Delete == "true"
 	}
@@ -51,13 +39,6 @@ func (o Overrides) Apply(onDelete, onZero bool) (bool, bool) {
 		onZero = o.Zero == "true"
 	}
 	return onDelete, onZero
-}
-
-var namePattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$`)
-
-func (o Owner) Valid() bool {
-	return namePattern.MatchString(o.Namespace) && namePattern.MatchString(o.Name) && o.UID != "" &&
-		(o.Kind == "Deployment" || o.Kind == "StatefulSet")
 }
 
 type reference struct {
@@ -73,6 +54,7 @@ type object struct {
 		UID               string            `json:"uid"`
 		References        []reference       `json:"ownerReferences,omitempty"`
 		DeletionTimestamp *time.Time        `json:"deletionTimestamp,omitempty"`
+		Generation        int64             `json:"generation,omitempty"`
 		Annotations       map[string]string `json:"annotations,omitempty"`
 	} `json:"metadata"`
 	Spec struct {
@@ -90,12 +72,12 @@ type Client struct {
 var errNotFound = errors.New("Kubernetes object not found")
 
 var collection = map[string]string{
-	"Pod": "pods", "ReplicaSet": "replicasets", "Deployment": "deployments", "StatefulSet": "statefulsets",
+	"Pod": "pods", "StatefulSet": "statefulsets",
 }
 
 func resourcePath(kind, namespace, name string) (string, error) {
 	resource, ok := collection[kind]
-	if !ok || !namePattern.MatchString(namespace) || !namePattern.MatchString(name) {
+	if !ok || !ownership.ValidName(namespace) || !ownership.ValidName(name) {
 		return "", errors.New("invalid Kubernetes resource identity")
 	}
 	prefix := "/apis/apps/v1"
@@ -144,7 +126,7 @@ func controller(obj object) reference {
 	var owner reference
 	for _, ref := range obj.Metadata.References {
 		if ref.Controller {
-			if owner.Controller || ref.APIVersion != "apps/v1" || ref.UID == "" || !namePattern.MatchString(ref.Name) {
+			if owner.Controller || ref.APIVersion != "apps/v1" || ref.UID == "" || !ownership.ValidName(ref.Name) {
 				return reference{}
 			}
 			owner = ref
@@ -153,53 +135,61 @@ func controller(obj object) reference {
 	return owner
 }
 
-func (c Client) Resolve(ctx context.Context, namespace, pod, uid string) (Owner, error) {
+func (c Client) Resolve(ctx context.Context, namespace, pod, uid string) (ownership.Owner, error) {
 	if uid == "" {
-		return Owner{}, nil
+		return ownership.Owner{}, nil
 	}
 	obj, err := c.get(ctx, "Pod", namespace, pod)
 	if errors.Is(err, errNotFound) {
-		return Owner{}, nil
+		return ownership.Owner{}, nil
 	}
 	if err != nil || obj.Metadata.UID != uid {
-		return Owner{}, err
-	}
-	overrides := readOverrides(obj.Metadata.Annotations)
-	ownedBy := func(ref reference) Owner {
-		return Owner{Namespace: namespace, Kind: ref.Kind, Name: ref.Name, UID: ref.UID, Overrides: overrides}
+		return ownership.Owner{}, err
 	}
 	ref := controller(obj)
-	if ref.Kind == "StatefulSet" {
-		return ownedBy(ref), nil
+	if ref.Kind != "StatefulSet" {
+		return ownership.Owner{}, nil
 	}
-	if ref.Kind == "ReplicaSet" {
-		obj, err := c.get(ctx, ref.Kind, namespace, ref.Name)
-		if errors.Is(err, errNotFound) {
-			return Owner{}, nil
-		}
-		if err != nil || obj.Metadata.UID != ref.UID {
-			return Owner{}, err
-		}
-		if ref = controller(obj); ref.Kind == "Deployment" {
-			return ownedBy(ref), nil
-		}
+	set, err := c.get(ctx, "StatefulSet", namespace, ref.Name)
+	if err != nil {
+		return ownership.Owner{}, err
 	}
-	return Owner{}, nil
+	if set.Metadata.UID != ref.UID || set.Metadata.DeletionTimestamp != nil {
+		return ownership.Owner{}, errors.New("Pod refers to a replaced or terminating StatefulSet")
+	}
+	return ownership.Owner{Namespace: namespace, Kind: ref.Kind, Name: ref.Name, UID: ref.UID,
+		Overrides: readOverrides(obj.Metadata.Annotations)}, nil
 }
 
-func (c Client) Reclaim(ctx context.Context, owner Owner, onDelete, onZero bool) (bool, error) {
+type ReclaimReason uint8
+
+const (
+	ReclaimNone ReclaimReason = iota
+	ReclaimZero
+	ReclaimDeleted
+)
+
+// Reclaim observes a single StatefulSet. Only a scale-to-zero decision carries
+// a generation, so another spec change invalidates its previously staged grace.
+func (c Client) Reclaim(ctx context.Context, owner ownership.Owner, onDelete, onZero bool) (ReclaimReason, int64, error) {
 	if !(onDelete || onZero) || !owner.Valid() {
-		return false, nil
+		return ReclaimNone, 0, nil
 	}
 	obj, err := c.get(ctx, owner.Kind, owner.Namespace, owner.Name)
-	if errors.Is(err, errNotFound) {
-		return onDelete, nil
+	if err != nil && !errors.Is(err, errNotFound) {
+		return ReclaimNone, 0, err
 	}
-	if err != nil {
-		return false, err
+	if errors.Is(err, errNotFound) || obj.Metadata.UID != owner.UID || (obj.Metadata.DeletionTimestamp != nil && !obj.Metadata.DeletionTimestamp.IsZero()) {
+		if onDelete {
+			return ReclaimDeleted, 0, nil
+		}
+		return ReclaimNone, 0, nil
 	}
-	if obj.Metadata.UID != owner.UID || (obj.Metadata.DeletionTimestamp != nil && !obj.Metadata.DeletionTimestamp.IsZero()) {
-		return onDelete, nil
+	if onZero && obj.Spec.Replicas != nil && *obj.Spec.Replicas == 0 {
+		if obj.Metadata.Generation <= 0 {
+			return ReclaimNone, 0, errors.New("scaled-down StatefulSet response has no valid generation")
+		}
+		return ReclaimZero, obj.Metadata.Generation, nil
 	}
-	return onZero && obj.Spec.Replicas != nil && *obj.Spec.Replicas == 0, nil
+	return ReclaimNone, 0, nil
 }
