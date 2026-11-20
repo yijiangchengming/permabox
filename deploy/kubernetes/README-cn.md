@@ -9,6 +9,7 @@ PermaBox 通过 Kubernetes `RuntimeClass`（`node.k8s.io/v1`）选择节点上�
 | 原生 Kubernetes + containerd | [手动配置目标节点](../README-cn.md) | [CI](../../.github/workflows/ci.yml) 使用基于 kubeadm 的 kind 节点验证 Kubernetes 1.35.8、1.36.4、1.37.0。 |
 | systemd 管理、内置 containerd 的 K3s | [Helm 自动安装](../k3s/README-cn.md) | CI 覆盖单节点 K3s `v1.34.5+k3s1`。 |
 | 使用 containerd 的 RKE2、MicroK8s、k0s | 按下文在节点注册 | 提供手动接入方式，暂无端到端认证。 |
+| 使用 VFS 的 CRI-O | [在独立节点手动安装](../crio/README-cn.md) | CRI 接口验证覆盖 CRI-O 1.34.0、conmon 2.1.13 和 runc 1.3.1；暂无 Kubernetes 端到端验证。不支持默认 overlay 驱动。 |
 | 托管 Kubernetes | 仅在允许修改节点配置和注册自定义 CRI 处理器的 Linux 节点池手动接入 | 需用实际节点镜像验证；受限及无服务器节点池不在当前安装范围内。 |
 
 CI 矩阵之外的 Kubernetes 版本尚未验证。节点还需满足 Kubernetes 上游的 CRI 与版本要求。containerd 配置 v2 和 v3 指的是 TOML 格式，与 Kubernetes 版本或 containerd 大版本不是同一个概念。
@@ -23,4 +24,4 @@ CI 矩阵之外的 Kubernetes 版本尚未验证。节点还需满足 Kubernetes
 
 要启用 StatefulSet 删除和缩到零回收，可参考独立的 [workload-bridge.yaml](workload-bridge.yaml)。它使用手动安装指南中的节点标签，要求节点上存在 `/usr/local/bin/permabox`、由 root 拥有且权限为 `0700` 的 `/opt/permabox`，并设置 `workload_socket: /opt/permabox/workload.sock`。桥接只读取 Pod 和 StatefulSet，节点上的定期回收仍需按手动指南分别配置。
 
-`runc` 是默认 OCI 运行时；原生 Kubernetes CI 也覆盖 containerd 调用 `crun`。其他运行时即使命令行相似，也可能采用不同的根文件系统和卸载流程，部署前应单独验证。除非工作流和安装指南另有说明，Kata、gVisor、CRI-O 和 Windows 不在已验证矩阵内。
+`runc` 是默认 OCI 运行时；原生 Kubernetes CI 也覆盖 containerd 调用 `crun`。其他运行时即使命令行相似，也可能采用不同的根文件系统和卸载流程。Kata、gVisor 和 Windows 不在已验证矩阵内。

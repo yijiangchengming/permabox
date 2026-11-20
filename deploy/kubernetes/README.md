@@ -9,6 +9,7 @@ PermaBox uses Kubernetes `RuntimeClass` (`node.k8s.io/v1`) to select a node's CR
 | Upstream Kubernetes with containerd | [Manual node installation](../README.md) | The [CI workflow](../../.github/workflows/ci.yml) tests Kubernetes 1.35.8, 1.36.4, and 1.37.0 on kubeadm-based kind nodes. |
 | systemd K3s with embedded containerd | [Helm installer](../k3s/README.md) | Single-node K3s `v1.34.5+k3s1` in CI. |
 | RKE2, MicroK8s, k0s with containerd | Distribution-specific registration below | Manual integration; no end-to-end certification. |
+| CRI-O with VFS | [Dedicated node setup](../crio/README.md) | CRI-O 1.34.0, conmon 2.1.13 and runc 1.3.1 tested through CRI; no Kubernetes end-to-end test. The default overlay driver is unsupported. |
 | Managed Kubernetes | Manual registration on Linux node pools that permit custom CRI handlers and node configuration | Validate against the exact node image. Restricted and serverless pools are outside the supported installation model. |
 
 Kubernetes versions outside the CI matrix are unverified. A working Kubernetes/runtime combination must also meet the upstream Kubernetes CRI and version requirements. Containerd configuration v2/v3 refers to the TOML format, not the Kubernetes version or the containerd major version.
@@ -23,4 +24,4 @@ Follow the [manual installation guide](../README.md) to install PermaBox and con
 
 For optional StatefulSet deletion and scale-to-zero GC, [workload-bridge.yaml](workload-bridge.yaml) is a standalone example using the node label in the manual guide. It assumes a PermaBox binary at `/usr/local/bin/permabox`, a root-owned private directory at `/opt/permabox` with mode `0700`, and `workload_socket: /opt/permabox/workload.sock` in the node config. The bridge only reads Pods and StatefulSets. Follow the manual guide to configure the node's separate periodic sweep.
 
-`runc` is the default underlying OCI runtime. The upstream CI matrix also exercises `crun` behind containerd. A different OCI runtime may parse a similar CLI but use a different root filesystem or cleanup lifecycle; validate it before use. Kata, gVisor, CRI-O and Windows are outside the verified matrix unless specifically listed in the workflow and installation guides.
+`runc` is the default underlying OCI runtime. The upstream CI matrix also exercises `crun` behind containerd. A different OCI runtime may parse a similar CLI but use a different root filesystem or cleanup lifecycle. Kata, gVisor and Windows are outside the verified matrix.

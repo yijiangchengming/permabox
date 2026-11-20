@@ -1,5 +1,7 @@
 # PermaBox on CRI-O
 
+[简体中文](README-cn.md)
+
 This compatibility slice supports **CRI-O 1.34.0 with the VFS storage driver, conmon and runc**. Use a dedicated Linux node or disposable CRI-O instance. VFS is a CRI-O-wide setting, needs a separate graph and run root, and uses more disk space because it copies layers. Do not switch an existing production node to VFS in place. Checkpoint/restore, alternate OCI runtimes, user namespaces and enforcing SELinux were not validated by this slice.
 
 CRI-O's default `overlay` driver is unsupported. `StopContainer` asks `containers/storage` to unmount the rootfs before CRI-O invokes OCI `delete`. The overlay driver's lazy unmount detaches PermaBox's top mount and leaves CRI-O's original mount in place, so replacing the mountpoint fails with `EBUSY`. VFS returns a directory and its stop-time `Put` is a no-op. OCI `delete` can therefore clean up PermaBox's overlay before storage removes that directory. PermaBox rejects selected CRI-O workloads whose OCI rootfs does not use the VFS layout.
