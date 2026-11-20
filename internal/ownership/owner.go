@@ -23,3 +23,7 @@ func ValidName(name string) bool { return namePattern.MatchString(name) }
 func (o Owner) Valid() bool {
 	return ValidName(o.Namespace) && ValidName(o.Name) && o.UID != "" && o.Kind == "StatefulSet"
 }
+
+func (o Owner) SameWorkload(other Owner) bool {
+	return o.Valid() && other.Valid() && o.Namespace == other.Namespace && o.Kind == other.Kind && o.Name == other.Name && o.UID == other.UID
+}

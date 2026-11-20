@@ -80,13 +80,16 @@ func Run(cfg config.Config, manager mount.Manager, args []string, report func(st
 			}
 			if bundle := options.Persistence; bundle != nil {
 				slot := filepath.Join(storage, bundle.Namespace, bundle.Pod)
-				var owner ownership.Owner
-				if cfg.WorkloadGC() {
-					var lookupErr error
-					owner, lookupErr = workloadClient(cfg).Resolve(context.Background(), bundle.Namespace, bundle.Pod, bundle.PodUID)
-					if lookupErr != nil {
-						report("create %s: could not identify workload for GC: %v", inv.ID, lookupErr)
+				owner, lookupErr := workloadClient(cfg).Resolve(context.Background(), bundle.Namespace, bundle.Pod, bundle.PodUID)
+				if lookupErr != nil || !owner.Valid() {
+					if pinnedNow {
+						lookupErr = errors.Join(lookupErr, routing.forget(inv.ID))
 					}
+					if lookupErr == nil {
+						lookupErr = errors.New("persistence requires a verified StatefulSet owner")
+					}
+					report("create %s: %v", inv.ID, lookupErr)
+					return 1
 				}
 				installed, err = manager.PrepareOwned(inv.ID, bundle.Root, slot, bundle.Container, owner)
 				if err != nil {
@@ -114,15 +117,9 @@ func Run(cfg config.Config, manager mount.Manager, args []string, report func(st
 				return code
 			}
 			if managed {
-				slot, err := manager.CleanupSlot(inv.ID)
-				if err != nil {
+				if err := manager.Cleanup(inv.ID); err != nil {
 					report("delete %s: %v", inv.ID, err)
 					return 1
-				}
-				if cfg.WorkloadGC() && slot != "" {
-					if err := sweepWorkloads(manager, cfg.AllStorageRoots(), slot, 0, time.Now(), workloadReclaimer(context.Background(), cfg)); err != nil {
-						report("delete %s: workload GC will retry: %v", inv.ID, err)
-					}
 				}
 			}
 			if pinned.Runtime != "" {
@@ -152,7 +149,6 @@ func Run(cfg config.Config, manager mount.Manager, args []string, report func(st
 			}
 			if err := manager.ActivateOwnership(inv.ID); err != nil {
 				report("start %s: commit workload ownership: %v", inv.ID, err)
-				return 1
 			}
 			return 0
 		}

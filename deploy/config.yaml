@@ -6,7 +6,8 @@ storage_roots: {}
 underlying_runtimes: {}
 # Go duration. Zero retains released data; GC still retries stale cleanup.
 gc_idle_ttl: "0s"
-# These require a local Kubernetes metadata bridge (configured by the K3s chart).
+# Required for StatefulSet identity checks, even when workload GC is disabled.
+workload_socket: /opt/permabox/workload.sock
 gc_on_workload_delete: false
 gc_on_scale_to_zero: false
 gc_workload_annotations: false

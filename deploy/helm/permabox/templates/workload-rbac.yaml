@@ -1,4 +1,4 @@
-{{- if and (eq .Values.mode "install") (or .Values.gcOnWorkloadDelete .Values.gcOnScaleToZero .Values.gcWorkloadAnnotations) }}
+{{- if eq .Values.mode "install" }}
 {{- $name := include "permabox.workloadGCName" . }}
 apiVersion: v1
 kind: ServiceAccount

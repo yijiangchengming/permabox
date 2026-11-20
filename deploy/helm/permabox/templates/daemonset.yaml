@@ -18,9 +18,9 @@ spec:
       labels:
         {{- include "permabox.selectorLabels" . | nindent 8 }}
     spec:
-      {{- $workloadGC := and (eq .Values.mode "install") (or .Values.gcOnWorkloadDelete .Values.gcOnScaleToZero .Values.gcWorkloadAnnotations) }}
-      automountServiceAccountToken: {{ $workloadGC }}
-      {{- if $workloadGC }}
+      {{- $workloadBridge := eq .Values.mode "install" }}
+      automountServiceAccountToken: {{ $workloadBridge }}
+      {{- if $workloadBridge }}
       serviceAccountName: {{ include "permabox.workloadGCName" . }}
       {{- else }}
       serviceAccountName: default
@@ -72,7 +72,7 @@ spec:
               value: {{ .Values.persistAnnotation | quote }}
           readinessProbe:
             exec:
-              {{- if $workloadGC }}
+              {{- if $workloadBridge }}
               command: ["/bin/sh", "-c", "test -f /tmp/permabox-ready && /usr/local/lib/permabox/permabox check-workload-bridge /host/opt/permabox-k3s/workload.sock"]
               {{- else }}
               command: ["test", "-f", "/tmp/permabox-ready"]

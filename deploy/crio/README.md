@@ -23,6 +23,8 @@ CRI-O's default `overlay` driver is unsupported. `StopContainer` asks `container
 2. Install [99-permabox-vfs.conf](99-permabox-vfs.conf) under `/etc/crio/crio.conf.d/`. Check for CLI flags or later drop-ins overriding the VFS settings, and remove any inherited overlay-specific `storage_option` settings from this dedicated instance. Point `monitor_path` at conmon if it is not on the service's `PATH`. Leave the default runtime and cgroup manager appropriate for the node. Run `sudo crio config` to inspect the merged configuration, restart CRI-O, then run `sudo crictl --runtime-endpoint unix:///run/crio/crio.sock info` (adjust for the socket kubelet actually uses).
 3. Label exactly one eligible node and apply [runtimeclass.yaml](runtimeclass.yaml). CRI-O workloads select `runtimeClassName: permabox-crio`. The OCI handler remains `permabox`; the distinct RuntimeClass name lets CRI-O and containerd use different node selectors in the same cluster.
 
+Before deploying a persistent workload, create `/opt/permabox` with owner `root` and mode `0700` on the node. Label it `permabox.io.node-restriction.kubernetes.io/crio-gc=true`, apply [the metadata bridge](../kubernetes/workload-bridge.yaml), and wait for its DaemonSet to be ready. The socket path in the example config is `/opt/permabox/workload.sock`. This bridge is required even with GC disabled.
+
 ```sh
 (
   set -eu
@@ -39,11 +41,11 @@ CRI-O's default `overlay` driver is unsupported. `StopContainer` asks `container
 
 Use the [shared rootfs verification steps](../README.md#4-verify-that-file-changes-survive-pod-recreation). They check that a replacement Pod on the same node and image retains a newly created file, an edited image file, and deletion of an image file. If the Pod fails, inspect its events, the CRI-O service log, and `/var/log/permabox.log` on the selected node. Use only trusted workloads and a clean namespace/Pod identity for the first test.
 
-When upgrading from the old CRI-O RuntimeClass named `permabox`, create `permabox-crio` first and update each StatefulSet's Pod template to use it. Keep the old class available until the affected Pods have rolled out, then remove or repurpose it only after checking for other users. Keep the same node, namespace and StatefulSet name to reuse each replica's existing write layer.
+When upgrading from the old CRI-O RuntimeClass named `permabox`, create `permabox-crio` first and update each StatefulSet's Pod template to use it. Keep the old class available until the affected Pods have rolled out, then remove or repurpose it only after checking for other users. Keep the same node and StatefulSet UID to reuse each replica's layer. Follow the [shared upgrade guidance](../README.md) for layers without verified ownership.
 
 ## Enable StatefulSet reclamation
 
-For Kubernetes-aware reclamation, create `/opt/permabox` with owner `root` and mode `0700` on the selected CRI-O node. Label it `permabox.io.node-restriction.kubernetes.io/crio-gc=true` and apply the [workload metadata bridge](../kubernetes/workload-bridge.yaml). If that node previously used the shared `pinned` label solely for the bridge, remove it after configuring the new label; `pinned` also selects nodes for the containerd RuntimeClass. Wait for the bridge DaemonSet to be ready before enabling the policies. Set `workload_socket: /opt/permabox/workload.sock` in the PermaBox configuration, then enable `gc_on_workload_delete`, `gc_on_scale_to_zero` or `gc_workload_annotations` as needed. Configure the periodic `permabox gc` task described in the [shared deployment guide](../README.md) to retry reclamation when cleanup or metadata is temporarily unavailable.
+With the metadata bridge running, enable `gc_on_workload_delete`, `gc_on_scale_to_zero` or `gc_workload_annotations` as needed. Configure the periodic `permabox gc` task described in the [shared deployment guide](../README.md) to reclaim released layers and retry temporary failures.
 
 Each StatefulSet ordinal has an independent write layer. Scaling from two replicas to one retains the removed ordinal's data so it can be reused if that ordinal returns to the same node. With `gc_on_scale_to_zero` enabled, scaling the whole StatefulSet to zero reclaims all released layers for that StatefulSet.
 

@@ -149,6 +149,13 @@ func (c Client) Resolve(ctx context.Context, namespace, pod, uid string) (owners
 	if ref.Kind != "StatefulSet" {
 		return ownership.Owner{}, nil
 	}
+	set, err := c.get(ctx, "StatefulSet", namespace, ref.Name)
+	if err != nil {
+		return ownership.Owner{}, err
+	}
+	if set.Metadata.UID != ref.UID || set.Metadata.DeletionTimestamp != nil {
+		return ownership.Owner{}, errors.New("Pod refers to a replaced or terminating StatefulSet")
+	}
 	return ownership.Owner{Namespace: namespace, Kind: ref.Kind, Name: ref.Name, UID: ref.UID,
 		Overrides: readOverrides(obj.Metadata.Annotations)}, nil
 }

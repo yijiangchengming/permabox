@@ -75,10 +75,16 @@ func TestFailedCreatePreservesOwner(t *testing.T) {
 	}
 	replacement := owner
 	replacement.UID = "replacement"
-	if _, err := m.PrepareOwned("failed-create", root, slot, "app", replacement); err != nil {
+	if _, err := m.PrepareOwned("replacement", root, slot, "app", replacement); err == nil {
+		t.Fatal("replacement StatefulSet inherited the old writable layer")
+	}
+	if _, err := m.PrepareOwned("unverified", root, slot, "app", ownership.Owner{}); err == nil {
+		t.Fatal("unverified workload inherited the old writable layer")
+	}
+	if _, err := m.PrepareOwned("rollout", root, slot, "app", owner); err != nil {
 		t.Fatal(err)
 	}
-	if err := m.Cleanup("failed-create"); err != nil {
+	if err := m.Cleanup("rollout"); err != nil {
 		t.Fatal(err)
 	}
 	candidates, err := m.DiscoverReleased(roots, "", 0, time.Now())

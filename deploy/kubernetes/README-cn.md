@@ -24,6 +24,6 @@ CI 矩阵之外的 Kubernetes 版本尚未验证。节点还需满足 Kubernetes
 - **MicroK8s：** 将运行时配置合入 `/var/snap/microk8s/current/args/containerd-template.toml`，使用当前 snap 的配置格式，然后通过 snap 服务管理重启 MicroK8s 的 containerd。`underlying_runtime` 使用节点上的实际可执行文件路径，可能位于 snap 内。参见 [MicroK8s 服务配置文档](https://canonical.com/microk8s/docs/configuring-services)。
 - **k0s：** 对由 k0s 管理 containerd 的节点，安装 `/etc/k0s/containerd.d/permabox.toml`。k0s 1.36 及以上使用 v3 示例，较早版本按实际配置格式选择。`SystemdCgroup` 须匹配节点；默认单节点配置使用 cgroupfs，应设为 `false`。外部管理的 containerd 使用常规手动安装方式。参见 [k0s 运行时文档](https://docs.k0sproject.io/stable/runtime/)。
 
-要启用 StatefulSet 删除和缩到零回收，可参考独立的 [workload-bridge.yaml](workload-bridge.yaml)。它使用手动安装指南中的节点标签，要求节点上存在 `/usr/local/bin/permabox`、由 root 拥有且权限为 `0700` 的 `/opt/permabox`，并设置 `workload_socket: /opt/permabox/workload.sock`。桥接只读取 Pod 和 StatefulSet，节点上的定期回收仍需按手动指南分别配置。
+启动持久化工作负载前，先安装[元数据桥接](workload-bridge.yaml)。它使用手动安装指南中的节点标签，要求节点上存在 `/usr/local/bin/permabox`、由 root 拥有且权限为 `0700` 的 `/opt/permabox`，并设置 `workload_socket: /opt/permabox/workload.sock`。桥接只读取 Pod 和 StatefulSet，节点上的定期回收仍需按手动指南分别配置。
 
 `runc` 是默认 OCI 运行时；原生 Kubernetes CI 也覆盖 containerd 调用 `crun`。其他运行时即使命令行相似，也可能采用不同的根文件系统和卸载流程。Kata、gVisor 和 Windows 不在已验证矩阵内。

@@ -5,6 +5,7 @@ package lifecycle
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -92,6 +93,68 @@ func TestManagedStartCommitsOwnershipOnlyAfterSuccess(t *testing.T) {
 		if err := json.Unmarshal(data, &got); err != nil || got.UID != tc.owner {
 			t.Fatalf("owner after start exit %d = %q (%v); want %q", code, got.UID, err, tc.owner)
 		}
+	}
+}
+func TestCreateRequiresAvailableWorkloadIdentity(t *testing.T) {
+	base := privateStateDir(t)
+	bundle := filepath.Join(base, "bundle")
+	slot := filepath.Join(base, "store", "default", "app-0")
+	for _, dir := range []string{bundle, slot} {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	marker := filepath.Join(slot, ".permabox-workload.json")
+	const old = `{"namespace":"default","kind":"StatefulSet","name":"app","uid":"old"}`
+	if err := os.WriteFile(marker, []byte(old), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bundle, "config.json"), []byte(`{"root":{"path":"rootfs"},"annotations":{"io.kubernetes.cri.sandbox-namespace":"default","io.kubernetes.cri.sandbox-name":"app-0","io.kubernetes.cri.sandbox-uid":"pod-uid","permabox.io/persist":"true"}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TEST_REPORT_STDERR", "1")
+	out, stderr, code := call(t, base, "0", "create", "--bundle", bundle, "id")
+	if code != 1 || out != "" || !strings.Contains(stderr, "unavailable.sock") {
+		t.Fatalf("unverified create: stdout=%q stderr=%q status=%d", out, stderr, code)
+	}
+	if data, err := os.ReadFile(marker); err != nil || string(data) != old {
+		t.Fatalf("existing owner changed: %q (%v)", data, err)
+	}
+	if _, err := os.Stat(filepath.Join(base, "id.runtime")); !os.IsNotExist(err) {
+		t.Fatalf("runtime choice not rolled back: %v", err)
+	}
+}
+
+func TestOwnershipCommitFailureDoesNotChangeStartStatus(t *testing.T) {
+	base := privateStateDir(t)
+	slot := filepath.Join(base, "store", "default", "app-0")
+	marker := filepath.Join(slot, ".permabox-workload.json")
+	if err := os.MkdirAll(marker, 0700); err != nil {
+		t.Fatal(err)
+	}
+	ns, err := os.Readlink("/proc/self/ns/mnt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal, err := json.Marshal(map[string]any{"mount_namespace": ns, "root": filepath.Join(base, "rootfs"), "slot": slot,
+		"pending_workload_owner": json.RawMessage(`{"namespace":"default","kind":"StatefulSet","name":"app","uid":"app-uid"}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(base, "id.json"), journal, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, code := call(t, base, "0", "start", "id"); code != 0 {
+		t.Fatalf("successful runtime start reported status %d", code)
+	}
+	if err := os.Remove(marker); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, code := call(t, base, "0", "gc"); code != 0 {
+		t.Fatalf("GC retry returned status %d", code)
+	}
+	if data, err := os.ReadFile(marker); err != nil || !bytes.Contains(data, []byte(`"uid":"app-uid"`)) {
+		t.Fatalf("GC did not repair ownership: %q (%v)", data, err)
 	}
 }
 
@@ -205,5 +268,12 @@ func TestWrapperHelper(t *testing.T) {
 	if _, err := os.Stat(changed); err == nil {
 		cfg.Runtime = changed
 	}
-	os.Exit(Run(cfg, mount.New(base), args, t.Logf))
+	cfg.WorkloadSocket = filepath.Join(base, "unavailable.sock")
+	report := t.Logf
+	if os.Getenv("TEST_REPORT_STDERR") != "" {
+		report = func(format string, args ...any) {
+			fmt.Fprintf(os.Stderr, format+"\n", args...)
+		}
+	}
+	os.Exit(Run(cfg, mount.New(base), args, report))
 }

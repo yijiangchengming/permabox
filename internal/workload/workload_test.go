@@ -18,6 +18,8 @@ func TestPodAnnotationsOverrideWorkloadDefaults(t *testing.T) {
 		switch r.URL.Path {
 		case "/api/v1/namespaces/test/pods/pod":
 			fmt.Fprint(w, `{"metadata":{"uid":"pod-id","annotations":{"permabox.io/gc-on-workload-delete":"true","permabox.io/gc-on-scale-to-zero":"false","other":"private"},"ownerReferences":[{"apiVersion":"apps/v1","kind":"StatefulSet","name":"app","uid":"app-id","controller":true}]}}`)
+		case "/apis/apps/v1/namespaces/test/statefulsets/app":
+			fmt.Fprint(w, `{"metadata":{"uid":"app-id"}}`)
 		default:
 			t.Errorf("unexpected upstream path %s", r.URL.Path)
 		}
@@ -90,11 +92,12 @@ func TestUnixBridgePreservesAuthoritativeNotFound(t *testing.T) {
 }
 
 func TestResolveStatefulSetOwner(t *testing.T) {
-	for _, tc := range []struct{ name, uid, rsUID, kind string }{
-		{"replicaset ignored", "pod-id", "rs-id", ""},
-		{"statefulset", "pod-id", "", "StatefulSet"},
-		{"replacement-pod", "old-pod", "rs-id", ""},
-		{"standalone", "pod-id", "", ""},
+	for _, tc := range []struct{ name, uid, rsUID, liveSetUID, kind string }{
+		{"replicaset ignored", "pod-id", "rs-id", "", ""},
+		{"statefulset", "pod-id", "", "app-id", "StatefulSet"},
+		{"replaced statefulset", "pod-id", "", "new-app-id", ""},
+		{"replacement-pod", "old-pod", "rs-id", "", ""},
+		{"standalone", "pod-id", "", "", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -103,10 +106,12 @@ func TestResolveStatefulSetOwner(t *testing.T) {
 					ref := `[]`
 					if tc.rsUID != "" {
 						ref = fmt.Sprintf(`[{"apiVersion":"apps/v1","kind":"ReplicaSet","name":"rs","uid":%q,"controller":true}]`, tc.rsUID)
-					} else if tc.name == "statefulset" {
+					} else if tc.liveSetUID != "" {
 						ref = `[{"apiVersion":"apps/v1","kind":"StatefulSet","name":"app","uid":"app-id","controller":true}]`
 					}
 					fmt.Fprintf(w, `{"metadata":{"uid":"pod-id","ownerReferences":%s}}`, ref)
+				case "/apis/apps/v1/namespaces/test/statefulsets/app":
+					fmt.Fprintf(w, `{"metadata":{"uid":%q}}`, tc.liveSetUID)
 				default:
 					t.Errorf("unexpected request %s", r.URL.Path)
 				}
@@ -114,7 +119,8 @@ func TestResolveStatefulSetOwner(t *testing.T) {
 			defer server.Close()
 			c := Client{base: server.URL, http: server.Client()}
 			got, err := c.Resolve(context.Background(), "test", "pod", tc.uid)
-			if err != nil || got.Kind != tc.kind || (tc.kind != "" && got != (ownership.Owner{Namespace: "test", Kind: tc.kind, Name: "app", UID: "app-id"})) {
+			wantError := tc.name == "replaced statefulset"
+			if (err != nil) != wantError || got.Kind != tc.kind || (tc.kind != "" && got != (ownership.Owner{Namespace: "test", Kind: tc.kind, Name: "app", UID: "app-id"})) {
 				t.Fatalf("owner = %+v, %v", got, err)
 			}
 		})

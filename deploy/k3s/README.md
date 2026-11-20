@@ -72,7 +72,7 @@ The installer runs `permabox validate-config` on the staged configuration before
 
 ## Workload garbage collection
 
-Workload GC policies apply only to StatefulSets. Enable either policy independently, for example with `--set gcOnWorkloadDelete=true --set gcOnScaleToZero=true`. Helm grants the installer read-only API permissions; the host does not need a kubeconfig. PermaBox attempts reclamation as soon as the writable layer is unmounted and the API confirms the policy condition. Periodic host GC revisits released or previously unconfirmed layers, normally on the next sweep. By default, the installer waits 60 seconds before each sweep. Both policies can reclaim data without waiting for `gcIdleTTL`, which applies separately.
+Workload GC policies apply only to StatefulSets. Enable either policy independently, for example with `--set gcOnWorkloadDelete=true --set gcOnScaleToZero=true`. Released layers are checked by the next periodic sweep (60 seconds by default, configurable with `gcIntervalSeconds`). Both policies can reclaim data without waiting for `gcIdleTTL`. Helm also runs a read-only metadata bridge for StatefulSet UID verification, even when GC policies are disabled. Review the [legacy layer upgrade guidance](../README.md#3-pin-the-example-to-one-node-and-deploy-it) before upgrading.
 
 Layers left by Deployments from earlier versions can still be reclaimed through `gcIdleTTL` once released.
 

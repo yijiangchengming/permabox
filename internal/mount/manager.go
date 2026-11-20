@@ -31,6 +31,7 @@ type record struct {
 	OverlayID    int              `json:"overlay_mount_id,omitempty"`
 	ReleasedAt   time.Time        `json:"released_at,omitempty"`
 	PendingOwner *ownership.Owner `json:"pending_workload_owner,omitempty"`
+	Started      bool             `json:"ownership_commit_pending,omitempty"`
 }
 
 func (r record) MarshalJSON() ([]byte, error) {
@@ -106,6 +107,9 @@ func (m Manager) PrepareOwned(id, root, slot, container string, owner ownership.
 		if !prev.ReleasedAt.IsZero() {
 			return false, errors.New("previous delete still needs cleanup")
 		}
+		if err := bindSlotOwner(slot, owner); err != nil {
+			return false, err
+		}
 		mounts, err := m.sys.mounts()
 		if err != nil {
 			return false, err
@@ -139,6 +143,9 @@ func (m Manager) PrepareOwned(id, root, slot, container string, owner ownership.
 	}
 	if _, err := os.Lstat(alias); !errors.Is(err, os.ErrNotExist) {
 		return false, fmt.Errorf("lower mount path is not available: %s", alias)
+	}
+	if err := bindSlotOwner(slot, owner); err != nil {
+		return false, err
 	}
 	if err := prepareSlot(slot, container, info); err != nil {
 		return false, err
@@ -175,17 +182,29 @@ func (m Manager) ActivateOwnership(id string) error {
 	if err != nil {
 		return err
 	}
-	if !state.ReleasedAt.IsZero() || state.PendingOwner == nil {
+	if !state.ReleasedAt.IsZero() || state.PendingOwner == nil || !state.PendingOwner.Valid() {
+		return nil
+	}
+	state.Started = true
+	if err := writeRecord(m.journal(id), state); err != nil {
+		return err
+	}
+	return m.commitOwnership(id, state)
+}
+
+func (m Manager) commitOwnership(id string, state record) error {
+	if !state.Started || state.PendingOwner == nil || !state.PendingOwner.Valid() {
 		return nil
 	}
 	if err := realDir(state.Slot); err != nil {
 		return err
 	}
-	path := filepath.Join(state.Slot, workloadMarker)
-	if state.PendingOwner.Valid() {
-		return writeRecord(path, state.PendingOwner)
+	if err := writeRecord(filepath.Join(state.Slot, workloadMarker), state.PendingOwner); err != nil {
+		return err
 	}
-	return removeDurable(path)
+	state.Started = false
+	state.PendingOwner = nil
+	return writeRecord(m.journal(id), state)
 }
 
 func (m Manager) install(id string, state *record) error {
@@ -338,6 +357,13 @@ func (m Manager) CleanupSlot(id string) (string, error) {
 }
 
 func (m Manager) releaseLocked(id string, state record, now time.Time) error {
+	if state.Started {
+		if err := m.commitOwnership(id, state); err != nil {
+			return err
+		}
+		state.Started = false
+		state.PendingOwner = nil
+	}
 	if state.ReleasedAt.IsZero() {
 		state.ReleasedAt = now
 		if err := writeRecord(m.journal(id), state); err != nil {

@@ -99,9 +99,70 @@ strip_block() {
   ' "$1"
 }
 
+rollback_transaction() {
+  local txn=$install_host/.transaction restore_template restore_unit asset restored
+  [[ -d $txn ]] || return 0
+  read -r restore_template <"$txn/template-name" || return 1
+  local restore_dir
+  read -r restore_dir <"$txn/k3s-data-dir" && [[ $restore_dir == "$data_dir" ]] || return 1
+  read -r restore_unit <"$txn/service" || return 1
+  case "$restore_template" in config.toml.tmpl|config-v3.toml.tmpl) ;; *) return 1 ;; esac
+  [[ $restore_unit =~ ^[A-Za-z0-9_.@-]+\.service$ && $restore_unit != -* ]] || return 1
+  restore_template=$dir/$restore_template
+  if [[ -f $txn/template ]]; then
+    if ! cmp -s "$txn/template" "$restore_template"; then
+      restored=$(mktemp "$dir/.permabox-restore.XXXXXXXX") || return 1
+      cp -p "$txn/template" "$restored" && mv -fT "$restored" "$restore_template" || return 1
+    fi
+  else
+    rm -f "$restore_template" || return 1
+  fi
+  for asset in current owner config.yaml permabox runtime; do
+    if [[ -e $txn/$asset || -L $txn/$asset ]]; then
+      cp -a --remove-destination "$txn/$asset" "$install_host/.restore-$asset" &&
+        mv -fT "$install_host/.restore-$asset" "$install_host/$asset" || return 1
+    else
+      rm -f "$install_host/$asset" || return 1
+    fi
+  done
+  if [[ -e $txn/restart ]]; then service_cmd --no-block restart "$restore_unit" || return 1; fi
+  finish_transaction "$txn"
+}
+
+finish_transaction() {
+  local txn=$1 finished
+  finished=$(mktemp -d "$install_host/.finished.XXXXXXXX") || return 1
+  mv -T "$txn" "$finished/txn" || return 1
+  sync -f "$install_host" || return 1
+  rm -rf "$finished"
+}
+
+publish_runtime() {
+  local stage=$1 digest generation
+  digest=$(sha256sum "$stage/permabox" "$stage/config.yaml" | awk '{ print $1 }' | sha256sum) || return 1
+  generation=versions/${digest%% *}
+  mkdir -p "$install_host/versions" || return 1
+  if [[ ! -d $install_host/$generation ]]; then
+    mkdir "$stage/version" && mv "$stage/permabox" "$stage/config.yaml" "$stage/version/" &&
+      mv -T "$stage/version" "$install_host/$generation" || return 1
+  fi
+  ln -s "$generation" "$stage/current" && mv -fT "$stage/current" "$install_host/current" &&
+    mv -fT "$stage/runtime" "$install_host/runtime" || return 1
+  # Inspection aliases remain at the original paths; the wrapper pins one generation.
+  local asset
+  for asset in config.yaml permabox; do
+    ln -s "current/$asset" "$stage/$asset.link" && mv -fT "$stage/$asset.link" "$install_host/$asset" || return 1
+  done
+}
+
 write_runtime() {
   local tmpdir=$1 empty_map='{}' payload=${PAYLOAD:-/usr/local/lib/permabox/permabox}
-  printf '#!/bin/sh\nexport PERMABOX_CONFIG=%s/config.yaml\nexec %s/permabox "$@"\n' "$install_dir" "$install_dir" >"$tmpdir/runtime"
+  # shellcheck disable=SC2016
+  printf '%s\n' '#!/bin/sh' \
+    "base=$install_dir" \
+    'generation=$(readlink "$base/current") || exit 1' \
+    'export PERMABOX_CONFIG="$base/$generation/config.yaml"' \
+    'exec "$base/$generation/permabox" "$@"' >"$tmpdir/runtime" || return 1
   # JSON is also valid YAML; jq preserves paths containing quotes or whitespace.
   jq -n --arg storage "$storage" --arg runtime "$underlying" --arg annotation "$annotation" \
     --argjson storage_roots "${STORAGE_ROOTS:-$empty_map}" --argjson runtimes "${UNDERLYING_RUNTIMES:-$empty_map}" \
@@ -133,10 +194,7 @@ write_runtime() {
   host_exec /usr/bin/test -x "$underlying" || { fail "underlying runtime not executable: $underlying"; return 1; }
   mkdir -p "$host$storage" || return 1
   install -m 0755 "$payload" "$tmpdir/permabox" || return 1
-  chmod 0755 "$tmpdir/runtime" || return 1
-  mv -fT "$tmpdir/permabox" "$install_host/permabox" &&
-    mv -fT "$tmpdir/config.yaml" "$install_host/config.yaml" &&
-    mv -fT "$tmpdir/runtime" "$install_host/runtime"
+  chmod 0755 "$tmpdir/runtime"
 }
 
 active_records() {
@@ -167,7 +225,7 @@ reconcile() (
   [[ -s $dir/config.toml ]] || { fail 'K3s embedded containerd configuration not found'; return 1; }
   [[ ! -L $install_host ]] || { fail 'install directory cannot be a symlink'; return 1; }
   mkdir -p "$install_host" || return 1
-  local lock info plugin version tmpdir candidate backup stem old=0 configured=0
+  local lock info plugin version tmpdir candidate stem old=0 configured=0 status
   exec {lock}>"$install_host/lock" && flock -w 60 "$lock" || return 1
   if [[ -f $install_host/owner && $(<"$install_host/owner") != "$OWNER" ]]; then
     fail 'runtime is owned by another Helm release'; return 1
@@ -175,6 +233,7 @@ reconcile() (
   info=$(get_info) || { fail 'could not read live K3s CRI configuration'; return 1; }
   if has_handler "$info"; then
     configured=1
+  rollback_transaction || { fail 'could not recover interrupted node configuration'; return 1; }
     if [[ ! -f $install_host/owner ]] || ! our_handler "$info"; then
       fail 'runtime handler permabox exists outside this Helm installer'; return 1
     fi
@@ -202,12 +261,16 @@ reconcile() (
   systemd=$(jq -c '.config.containerd | .runtimes[.defaultRuntimeName].options.SystemdCgroup // false' <<<"$info")
   [[ $systemd == true || $systemd == false ]] || { fail 'invalid cgroup driver setting'; return 1; }
   tmpdir=$(mktemp -d "$install_host/.stage.XXXXXXXX") || return 1
+  candidate=''
+  trap 'status=$?; if ! rollback_transaction; then fail "node rollback failed; recovery will retry"; status=1; fi; if [[ -n $candidate ]]; then rm -f "$candidate"; fi; rm -rf "$tmpdir"; exit "$status"' EXIT
   candidate=$(mktemp "$dir/.permabox-candidate.XXXXXXXX") || return 1
-  backup=$(mktemp "$dir/.permabox-backup.XXXXXXXX") || return 1
-  trap 'rm -f "$candidate" "$backup"; rm -rf "$tmpdir"' EXIT
+  local txn=$install_host/.transaction staged_txn=$tmpdir/txn asset
+  mkdir "$staged_txn" || return 1
+  printf '%s\n' "$stem" >"$staged_txn/template-name" && printf '%s\n' "$unit" >"$staged_txn/service" || return 1
+  printf '%s\n' "$data_dir" >"$staged_txn/k3s-data-dir" || return 1
   if [[ -f $template ]]; then
     old=1
-    cp -p "$template" "$backup" && chmod --reference="$template" "$candidate" || return 1
+    cp -p "$template" "$staged_txn/template" && chmod --reference="$template" "$candidate" || return 1
     if grep -Fxq "$begin" "$template" && [[ ! -f $install_host/owner ]]; then
       fail 'found an unowned PermaBox template block'; return 1
     fi
@@ -216,13 +279,18 @@ reconcile() (
     printf '%s\n%s\n' "$base_marker" '{{ template "base" . }}' >"$candidate"
   fi
 
+  if [[ $mode == install ]]; then write_runtime "$tmpdir" || return 1; fi
+  for asset in current owner config.yaml permabox runtime; do
+    if [[ -e $install_host/$asset || -L $install_host/$asset ]]; then
+      cp -a "$install_host/$asset" "$staged_txn/$asset" || return 1
+    fi
+  done
+  mv -T "$staged_txn" "$txn" || return 1
+
+  sync -f "$install_host" || return 1
   if [[ $mode == install ]]; then
-    local asset
-    for asset in owner config.yaml permabox runtime; do
-      if [[ -f $install_host/$asset ]]; then cp -p "$install_host/$asset" "$tmpdir/old-$asset" || return 1; fi
-    done
-    write_runtime "$tmpdir" || return 1
     printf '%s\n' "$OWNER" >"$tmpdir/owner" && mv -T "$tmpdir/owner" "$install_host/owner" || return 1
+    publish_runtime "$tmpdir" || return 1
     printf '%s\n[plugins."%s".containerd.runtimes.permabox]\n  runtime_type = "io.containerd.runc.v2"\n  pod_annotations = ["%s", "permabox.io/container", "permabox.io/storage-root", "permabox.io/underlying-runtime"]\n[plugins."%s".containerd.runtimes.permabox.options]\n  BinaryName = "%s"\n  SystemdCgroup = %s\n%s\n' \
       "$begin" "$plugin" "$annotation" "$plugin" "$wrapper" "$systemd" "$end" >>"$candidate"
   fi
@@ -240,23 +308,18 @@ reconcile() (
   fi
 
   if [[ $changed == 1 ]] || { [[ $mode == install ]] && ! desired_handler "$info"; } || [[ $mode == remove && $configured == 1 ]]; then
+    touch "$txn/restart" || return 1
+    sync -f "$install_host" || return 1
     if ! restart_service || ! wait_live; then
-      if [[ $changed == 1 ]]; then
-        if [[ $old == 1 ]]; then mv -fT "$backup" "$template" || return 1; else rm -f "$template" || return 1; fi
-      fi
-      if [[ $mode == install ]]; then
-        for asset in owner config.yaml permabox runtime; do
-          if [[ -f $tmpdir/old-$asset ]]; then mv -fT "$tmpdir/old-$asset" "$install_host/$asset" || return 1
-          else rm -f "$install_host/$asset" || return 1; fi
-        done
-      fi
-      service_cmd --no-block restart "$unit" || true
-      fail 'CRI did not converge; restored the previous installation'; return 1
+      fail 'CRI did not converge; rolling back node configuration'; return 1
     fi
   fi
   if [[ $mode == remove ]]; then
-    rm -f "$install_host/runtime" "$install_host/permabox" "$install_host/config.yaml" "$install_host/owner" || return 1
+    rm -f "$install_host/current" "$install_host/runtime" "$install_host/permabox" "$install_host/config.yaml" "$install_host/owner" || return 1
   fi
+  sync -f "$install_host" && sync -f "$dir" || return 1
+  finish_transaction "$txn" || return 1
+  if [[ $mode == remove ]]; then rm -rf "$install_host/versions" || return 1; fi
   touch "$ready" || return 1
   printf 'permabox-k3s: %s verified on node\n' "$mode"
 )
@@ -273,15 +336,13 @@ main() {
     fail 'GC_INTERVAL_SECONDS must be a positive integer'; return 1
   fi
   reconcile || return 1
-  trap 'if [[ -n $bridge_pid ]]; then kill "$bridge_pid" 2>/dev/null || true; fi; exit 0' TERM INT
+  trap 'if [[ -n $bridge_pid ]]; then kill "$bridge_pid" 2>/dev/null || true; wait "$bridge_pid" 2>/dev/null || true; fi; exit 0' TERM INT
   if [[ ${MODE:-install} == remove ]]; then
     sleep_interval infinity
     return
   fi
-  if [[ ${GC_ON_WORKLOAD_DELETE:-false} == true || ${GC_ON_SCALE_TO_ZERO:-false} == true || ${GC_WORKLOAD_ANNOTATIONS:-false} == true ]]; then
-    "${PAYLOAD:-/usr/local/lib/permabox/permabox}" serve-workloads "$socket" &
-    bridge_pid=$!
-  fi
+  "${PAYLOAD:-/usr/local/lib/permabox/permabox}" serve-workloads "$socket" &
+  bridge_pid=$!
   while sleep_interval "$interval"; do
     if [[ -n $bridge_pid ]] && ! kill -0 "$bridge_pid" 2>/dev/null; then
       rm -f "${READY_FILE:-/tmp/permabox-ready}"
@@ -291,6 +352,9 @@ main() {
       printf '%s\n' 'permabox-k3s: GC sweep failed; will retry at the next interval' >&2
     fi
   done
+  kill "$bridge_pid" 2>/dev/null || true
+  wait "$bridge_pid" 2>/dev/null || true
+  return 0
 }
 
 if [[ ${BASH_SOURCE[0]} == "$0" ]]; then

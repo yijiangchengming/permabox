@@ -12,6 +12,7 @@ mkdir -p "$HOST_ROOT/data/agent/etc/containerd" "$HOST_ROOT/data/data/current/bi
 # The fixture expands these variables when invoked as the payload.
 # shellcheck disable=SC2016
 printf '%s\n' '#!/bin/sh' \
+  'if [ "${1:-}" = serve-workloads ]; then exec sleep 60; fi' \
   '[ "$#" -eq 1 ] && [ "$1" = validate-config ] || exit 1' \
   'case "$PERMABOX_CONFIG" in "$HOST_ROOT"/opt/permabox-k3s/.stage.*/config.yaml) ;; *) exit 1 ;; esac' \
   '[ -s "$PERMABOX_CONFIG" ] && [ "${reject_config:-0}" = 0 ]' >"$PAYLOAD"
@@ -116,6 +117,32 @@ test "$(wc -l <"$tmp/restarts")" -eq 1
 
 cp "$HOST_ROOT/opt/permabox-k3s/config.yaml" "$tmp/original-config"
 cp "$templates/config-v3.toml.tmpl" "$tmp/installed-template"
+if (
+  mv() {
+    if [[ ${*: -1} == "$templates/config-v3.toml.tmpl" && $* == *'.permabox-candidate.'* ]]; then return 1; fi
+    command mv "$@"
+  }
+  PERSIST_ANNOTATION=example.test/persist reconcile
+) 2>/dev/null; then
+  printf '%s\n' 'accepted a failed template publication' >&2; exit 1
+fi
+cmp "$tmp/original-config" "$HOST_ROOT/opt/permabox-k3s/config.yaml"
+cmp "$tmp/installed-template" "$templates/config-v3.toml.tmpl"
+
+if (
+  mv() {
+    if [[ ${*: -1} == "$templates/config-v3.toml.tmpl" && $* == *'.permabox-candidate.'* ]]; then kill -KILL "$BASHPID"; fi
+    command mv "$@"
+  }
+  PERSIST_ANNOTATION=example.test/persist reconcile
+) 2>/dev/null; then
+  printf '%s\n' 'accepted an interrupted upgrade' >&2; exit 1
+fi
+# Recovery must precede staging: rejecting the next config should leave the old one intact.
+if reject_config=1 reconcile 2>/dev/null; then exit 1; fi
+cmp "$tmp/original-config" "$HOST_ROOT/opt/permabox-k3s/config.yaml"
+cmp "$tmp/installed-template" "$templates/config-v3.toml.tmpl"
+
 if PERSIST_ANNOTATION=example.test/persist fail_restart=1 reconcile 2>/dev/null; then
   printf '%s\n' 'accepted a failed runtime upgrade' >&2; exit 1
 fi

@@ -68,7 +68,7 @@ Chart 将同一套 `nodeSelector` 和 `tolerations` 应用于安装器和 Runtim
 
 安装器通过 `permabox validate-config` 验证暂存的配置，验证成功后才发布。默认运行时和别名均不得指向安装器包装器 `/opt/permabox-k3s/runtime`，否则会递归调用 PermaBox。
 
-两项工作负载回收策略仅适用于 StatefulSet，可独立开启，例如 Helm 的 `--set gcOnWorkloadDelete=true --set gcOnScaleToZero=true`。开启后，Helm 为安装器创建只读权限；宿主机无需配置 kubeconfig。容器卸载完成且 API 已确认满足条件时，立即尝试回收。宿主机定期 GC 会补查此前已释放或尚未确认的写层，通常在下一轮完成，默认每轮间隔 60 秒。两项策略都无需等待 `gcIdleTTL`；TTL 仍独立生效。
+两项工作负载回收策略仅适用于 StatefulSet，可独立开启，例如 Helm 的 `--set gcOnWorkloadDelete=true --set gcOnScaleToZero=true`。已释放的写层由下一轮周期任务检查，默认间隔 60 秒，可通过 `gcIntervalSeconds` 调整。两项策略都无需等待 `gcIdleTTL`。即使关闭回收，Helm 也会启动只读元数据桥接以核验 StatefulSet UID。升级前请参考[旧写层迁移说明](../README-cn.md)。
 
 旧版本中由 Deployment 留下的写层，在释放后仍可通过 `gcIdleTTL` 回收。
 
