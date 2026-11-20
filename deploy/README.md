@@ -109,11 +109,11 @@ Start with a clean example data directory and keep the image unchanged throughou
   test -n "$old_image"
 
   k exec "$pod" -c demo -- /bin/sh -ec '
-    test ! -e /permabox-created
+    test ! -e /etc/permabox-created
     test -f /etc/profile
     test "$(cat /etc/profile)" != "# modified-by-permabox"
     test -f /etc/inittab
-    printf "%s\n" created-by-permabox > /permabox-created
+    printf "%s\n" created-by-permabox > /etc/permabox-created
     printf "%s\n" "# modified-by-permabox" > /etc/profile
     rm /etc/inittab
   '
@@ -132,7 +132,7 @@ Start with a clean example data directory and keep the image unchanged throughou
   test "$(pod_field '{.status.containerStatuses[0].imageID}')" = "$old_image"
 
   k exec "$pod" -c demo -- /bin/sh -ec '
-    test "$(cat /permabox-created)" = created-by-permabox
+    test "$(cat /etc/permabox-created)" = created-by-permabox
     test "$(cat /etc/profile)" = "# modified-by-permabox"
     test ! -e /etc/inittab
   '

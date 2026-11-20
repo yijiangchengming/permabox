@@ -91,7 +91,7 @@ sudo crictl info
 
 ## 4. 验证写入、修改和删除能跨 Pod 重建保留
 
-使用干净的示例数据目录，并在整个验证过程中保持镜像不变。下列命令在容器根目录新建文件，改写镜像自带的 `/etc/profile`，删除镜像自带的 `/etc/inittab`，再正常删除 Pod。StatefulSet 重建同名 Pod 后，依次核对新 UID、同一节点、同一镜像 ID 和三个文件结果。测试路径都在根文件系统上，不使用挂载卷。
+使用干净的示例数据目录，并在整个验证过程中保持镜像不变。下列命令在容器的 `/etc` 中新建文件，改写镜像自带的 `/etc/profile`，删除镜像自带的 `/etc/inittab`，再正常删除 Pod。StatefulSet 重建同名 Pod 后，依次核对新 UID、同一节点、同一镜像 ID 和三个文件结果。测试路径都在根文件系统上，不使用挂载卷。
 
 ```sh
 (
@@ -109,11 +109,11 @@ sudo crictl info
   test -n "$old_image"
 
   k exec "$pod" -c demo -- /bin/sh -ec '
-    test ! -e /permabox-created
+    test ! -e /etc/permabox-created
     test -f /etc/profile
     test "$(cat /etc/profile)" != "# modified-by-permabox"
     test -f /etc/inittab
-    printf "%s\n" created-by-permabox > /permabox-created
+    printf "%s\n" created-by-permabox > /etc/permabox-created
     printf "%s\n" "# modified-by-permabox" > /etc/profile
     rm /etc/inittab
   '
@@ -132,7 +132,7 @@ sudo crictl info
   test "$(pod_field '{.status.containerStatuses[0].imageID}')" = "$old_image"
 
   k exec "$pod" -c demo -- /bin/sh -ec '
-    test "$(cat /permabox-created)" = created-by-permabox
+    test "$(cat /etc/permabox-created)" = created-by-permabox
     test "$(cat /etc/profile)" = "# modified-by-permabox"
     test ! -e /etc/inittab
   '
