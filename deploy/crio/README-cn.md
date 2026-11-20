@@ -2,7 +2,18 @@
 
 [English](README.md)
 
-支持的组合为 **CRI-O 1.34.0、VFS 存储驱动、conmon 2.1.13 和 runc 1.3.1**。[CRI-O 兼容性工作流](../../.github/workflows/compat-crio.yml) 使用原生 Kubernetes 1.34.0，检查 Pod 重建后文件的创建、修改和删除是否保留，并检查缩容到零、删除 StatefulSet 和注解覆盖的回收行为。请使用独立节点或临时 CRI-O 实例。VFS 是 CRI-O 实例级设置，需要独立的 graph root 和 run root，会复制镜像层并占用更多空间；请勿在已有生产节点上直接切换存储驱动。
+[CRI-O 兼容性工作流](../../.github/workflows/compat-crio.yml) 在 Ubuntu 24.04（amd64）上运行原生 Kubernetes，使用 VFS 和 CRI-O 发布包自带的 conmon、runc：
+
+| Kubernetes | CRI-O | 存储驱动 | OCI 运行时 |
+| --- | --- | --- | --- |
+| 1.34.0 | 1.34.0 | VFS | runc |
+| 1.35.8 | 1.35.8 | VFS | runc |
+| 1.36.4 | 1.36.4 | VFS | runc |
+| 1.37.0 | 1.37.0 | VFS | runc |
+
+每组都检查 Pod 重建后文件的创建、修改和删除是否保留，以及多副本隔离、部分缩容、缩容到零、删除 StatefulSet 和注解覆盖的行为。表中列出的是 CI 的精确配对，未覆盖其他补丁版本或混搭版本。
+
+请使用独立节点或临时 CRI-O 实例。VFS 是 CRI-O 实例级设置，需要独立的 graph root 和 run root，会复制镜像层并占用更多空间；请勿在已有生产节点上直接切换存储驱动。
 
 CRI-O 默认的 `overlay` 驱动不支持持久化：CRI-O 会在 OCI `delete` 前卸载容器根文件系统，与 PermaBox 的卸载顺序冲突。PermaBox 会拒绝为该布局挂载持久化写层。检查点和恢复、SELinux enforcing、用户命名空间、其他 OCI 运行时及 OpenShift 不在此次测试范围内。
 

@@ -11,9 +11,35 @@ permissions:
 
 jobs:
   crio:
-    name: Kubernetes 1.34.0 / CRI-O 1.34.0 / VFS / runc
+    name: Kubernetes ${{ matrix.version }} / CRI-O ${{ matrix.version }} / VFS / runc
     runs-on: ubuntu-24.04
     timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - version: '1.34.0'
+            crio_sha256: 5a8bc5c3b8072cb9bde1cf025d5597f75bf21018712c5b72d5cb0657948595c8
+            kubeadm_sha256: aecc23726768d1753fd417f6e7395cb1a350373295e8e9d9f80e95ed3618e38e
+            kubelet_sha256: 5c0d28cea2a3a5c91861dda088a29d56c1b027e184dae1d792686f0710750076
+            kubectl_sha256: cfda68cba5848bc3b6c6135ae2f20ba2c78de20059f68789c090166d6abc3e2c
+          - version: '1.35.8'
+            crio_sha256: 5f97c1f063d7aac94cc558575542a76e749044bd9641316ac692cd908a702118
+            kubeadm_sha256: 1bbc64a2be5b300880ae9330c6bba592ec2a2b8ecb79c527b0c7cc0f44070e5e
+            kubelet_sha256: 6971b9f95e54dbed67a2271abe6e78f8cc2894494649f3cf39e4b25a82dca923
+            kubectl_sha256: 874d5e72dbb819f43cff16bcd1e4f8bac5b7f2361fe1e55049b0a6c676fb0cbf
+          - version: '1.36.4'
+            crio_sha256: d0ff286aacf9e01b3239d0d21b9d5465ba015375b17af0c624e142e9f89294cf
+            kubeadm_sha256: 10d054585907f2c8bb823c84f6a66b3bd2a474c3d795475f04e9a44f78650fe6
+            kubelet_sha256: cf2562db46c48ab84cc3791540778ee7fb1a0a008529adbb434723dd02ed8b4b
+            kubectl_sha256: 8b8f088da2dab964f853b38464033b1be15ede2839eca751482357c45abdd05a
+          - version: '1.37.0'
+            crio_sha256: 7395fe9d2714a7e8fe972f106a114ef29eff38a18ad44d274d20717f7073b2ea
+            kubeadm_sha256: 9406f2e75c7fc99391f5fb0575b07914f2d90750d2b8c2c473e9c9c5194c9352
+            kubelet_sha256: ee554f77da57ad40a5d5f8625ac9c4af8b75d9d5a259367a885e5e816954b044
+            kubectl_sha256: 6129359f4e1f3848a5572ccb0b26cf28b8ca08cef38c95a765b2f64a2c961a2f
+    env:
+      RELEASE_VERSION: v${{ matrix.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -25,20 +51,25 @@ jobs:
         run: make build
       - name: Download and verify pinned upstream binaries
         working-directory: ${{ runner.temp }}
+        env:
+          CRIO_SHA256: ${{ matrix.crio_sha256 }}
+          KUBEADM_SHA256: ${{ matrix.kubeadm_sha256 }}
+          KUBELET_SHA256: ${{ matrix.kubelet_sha256 }}
+          KUBECTL_SHA256: ${{ matrix.kubectl_sha256 }}
         run: |
           mkdir crio-assets
           cd crio-assets
           fetch() { curl --fail --silent --show-error --location --retry 3 --max-time 180 --output "$1" "$2"; }
-          bundle=cri-o.amd64.v1.34.0.tar.gz
+          bundle="cri-o.amd64.$RELEASE_VERSION.tar.gz"
           fetch "$bundle" "https://storage.googleapis.com/cri-o/artifacts/$bundle"
           for bin in kubeadm kubelet kubectl; do
-            fetch "$bin" "https://dl.k8s.io/release/v1.34.0/bin/linux/amd64/$bin"
+            fetch "$bin" "https://dl.k8s.io/release/$RELEASE_VERSION/bin/linux/amd64/$bin"
           done
-          sha256sum --strict --check <<'EOF'
-          5a8bc5c3b8072cb9bde1cf025d5597f75bf21018712c5b72d5cb0657948595c8  cri-o.amd64.v1.34.0.tar.gz
-          aecc23726768d1753fd417f6e7395cb1a350373295e8e9d9f80e95ed3618e38e  kubeadm
-          5c0d28cea2a3a5c91861dda088a29d56c1b027e184dae1d792686f0710750076  kubelet
-          cfda68cba5848bc3b6c6135ae2f20ba2c78de20059f68789c090166d6abc3e2c  kubectl
+          sha256sum --strict --check <<EOF
+          $CRIO_SHA256  $bundle
+          $KUBEADM_SHA256  kubeadm
+          $KUBELET_SHA256  kubelet
+          $KUBECTL_SHA256  kubectl
           EOF
           tar -xzf "$bundle"
           chmod 0755 kubeadm kubelet kubectl
@@ -50,7 +81,7 @@ jobs:
         shell: bash
         run: |
           log="$RUNNER_TEMP/crio-smoke.log"
-          if ! bash deploy/crio/smoke_test.sh "$RUNNER_TEMP/crio-assets" 2>&1 | tee "$log"; then
+          if ! bash deploy/crio/smoke_test.sh "$RUNNER_TEMP/crio-assets" "$RELEASE_VERSION" 2>&1 | tee "$log"; then
             error=$(sed '/^Smoke test failed at /q' "$log" | tail -n 8)
             error=${error//%/%25}
             error=${error//$'\r'/%0D}

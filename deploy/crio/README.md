@@ -2,7 +2,18 @@
 
 [简体中文](README-cn.md)
 
-The supported configuration is **CRI-O 1.34.0 with VFS, conmon 2.1.13 and runc 1.3.1**. Use a dedicated Linux node or disposable CRI-O instance. VFS is a CRI-O-wide setting, needs a separate graph and run root, and uses more disk space because it copies layers. Do not switch an existing production node to VFS in place. The [CRI-O compatibility workflow](../../.github/workflows/compat-crio.yml) pairs these binaries with upstream Kubernetes 1.34.0 and checks file creation, modification and deletion across Pod replacement, scale-to-zero reclamation, StatefulSet deletion and annotation overrides. Checkpoint/restore, alternate OCI runtimes, user namespaces, enforcing SELinux and OpenShift are outside this test coverage.
+The [CRI-O compatibility workflow](../../.github/workflows/compat-crio.yml) runs upstream Kubernetes on Ubuntu 24.04 (amd64) with VFS and the conmon and runc binaries bundled by CRI-O:
+
+| Kubernetes | CRI-O | Storage driver | OCI runtime |
+| --- | --- | --- | --- |
+| 1.34.0 | 1.34.0 | VFS | runc |
+| 1.35.8 | 1.35.8 | VFS | runc |
+| 1.36.4 | 1.36.4 | VFS | runc |
+| 1.37.0 | 1.37.0 | VFS | runc |
+
+Each entry checks file creation, modification and deletion across Pod replacement, per-replica isolation, partial scale-down, scale-to-zero reclamation, StatefulSet deletion and annotation overrides. The table lists exact CI pairs; other patches and mixed Kubernetes/CRI-O versions are not covered. Checkpoint/restore, alternate OCI runtimes, user namespaces, enforcing SELinux and OpenShift are outside this test coverage.
+
+Use a dedicated Linux node or disposable CRI-O instance. VFS is a CRI-O-wide setting, needs a separate graph and run root, and uses more disk space because it copies layers. Do not switch an existing production node to VFS in place.
 
 CRI-O's default `overlay` driver is unsupported. `StopContainer` asks `containers/storage` to unmount the rootfs before CRI-O invokes OCI `delete`. The overlay driver's lazy unmount detaches PermaBox's top mount and leaves CRI-O's original mount in place, so replacing the mountpoint fails with `EBUSY`. VFS returns a directory and its stop-time `Put` is a no-op. OCI `delete` can therefore clean up PermaBox's overlay before storage removes that directory. PermaBox rejects selected CRI-O workloads whose OCI rootfs does not use the VFS layout.
 

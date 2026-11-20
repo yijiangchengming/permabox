@@ -3,6 +3,8 @@
 set -Eeuo pipefail
 
 assets=$(realpath "${1:?pass the directory containing the verified release assets}")
+version=${2:?pass the Kubernetes and CRI-O release version (vX.Y.Z)}
+[[ $version =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { printf 'Invalid release version: %s\n' "$version" >&2; exit 1; }
 bundle=$assets/cri-o
 socket=unix:///run/crio/crio.sock
 ns=permabox-demo
@@ -120,11 +122,16 @@ cri version
 node_exec /usr/local/bin/crio status info | grep -Fx 'storage driver: vfs'
 node_exec /usr/libexec/crio/conmon --version
 node_exec /usr/libexec/crio/runc --version
-node_exec "$assets/kubeadm" init --kubernetes-version=v1.34.0 --cri-socket="$socket" \
+node_exec "$assets/kubeadm" init --kubernetes-version="$version" --cri-socket="$socket" \
   --pod-network-cidr=10.244.0.0/24 --node-name=permabox-ci
 node=permabox-ci
 k taint node "$node" node-role.kubernetes.io/control-plane-
 k wait --for=condition=Ready "node/$node" --timeout=180s
+k get node "$node" -o json | jq -e --arg kubelet "$version" --arg runtime "cri-o://${version#v}" '
+  .status.nodeInfo | {kubeletVersion, containerRuntimeVersion}
+  | if .kubeletVersion == $kubelet and .containerRuntimeVersion == $runtime then .
+    else error("unexpected node versions: \(.)") end
+'
 # Both RuntimeClasses must be able to exist without sharing a node selector.
 k apply -f deploy/runtimeclass.yaml
 smoke_lifecycle
