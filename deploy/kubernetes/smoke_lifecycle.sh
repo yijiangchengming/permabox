@@ -45,7 +45,11 @@ smoke_lifecycle() {
   wait_for new_pod "$original"
   ready
   # shellcheck disable=SC2016
-  app exec "$pod" -c demo -- sh -ec 'test ! -e /etc/inittab; grep -Fxq permabox /etc/alpine-release; test "$(cat /permabox-marker)" = persisted'
+  app exec "$pod" -c demo -- sh -ec '
+    test ! -e /etc/inittab || { echo "/etc/inittab deletion did not persist" >&2; exit 1; }
+    grep -Fxq permabox /etc/alpine-release || { echo "/etc/alpine-release modification did not persist" >&2; exit 1; }
+    test "$(cat /permabox-marker)" = persisted || { echo "/permabox-marker creation did not persist" >&2; exit 1; }
+  '
 
   app patch statefulset permabox-demo --type=merge -p '{"spec":{"template":{"metadata":{"annotations":{"permabox.io/gc-on-scale-to-zero":"false"}}}}}'
   app rollout status statefulset/permabox-demo --timeout=120s

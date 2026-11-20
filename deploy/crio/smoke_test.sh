@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Run from the repository root on a fresh, disposable Ubuntu systemd VM.
-set -euo pipefail
+set -Eeuo pipefail
 
 assets=$(realpath "${1:?pass the directory containing the verified release assets}")
 bundle=$assets/cri-o
