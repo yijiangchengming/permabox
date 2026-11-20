@@ -8,7 +8,7 @@ pod=permabox-demo-0
 service=permabox-ci-rke2
 data=/var/lib/rancher/rke2
 agent=$data/agent
-runtime=$data/data/current/bin/runc
+runtime=$data/bin/runc
 kubeconfig=/etc/rancher/rke2/rke2.yaml
 [[ -x $rke2 && -x bin/permabox && $(ps -p 1 -o comm=) == systemd ]]
 node_exec() { sudo -n "$@"; }
