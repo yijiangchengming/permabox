@@ -61,7 +61,9 @@ node_exec "$k0s" version
 node_exec install -d -m 0755 /etc/k0s/containerd.d /etc/permabox
 node_exec install -d -m 0700 /opt/permabox
 node_exec install -m 0755 bin/permabox /usr/local/bin/permabox
-node_exec install -m 0644 deploy/containerd-2.x-v3.toml "$drop_in"
+# The stock k0s single-node profile uses cgroupfs.
+sed 's/SystemdCgroup = true/SystemdCgroup = false/' deploy/containerd-2.x-v3.toml |
+  node_exec tee "$drop_in" >/dev/null
 node_exec tee /etc/permabox/config.yaml >/dev/null <<EOF
 underlying_runtime: $runtime
 gc_on_workload_delete: true
@@ -95,7 +97,7 @@ cfg = tomllib.loads(sys.stdin.read())
 r = cfg["plugins"]["io.containerd.cri.v1.runtime"]["containerd"]["runtimes"]["permabox"]
 assert r["runtime_type"] == "io.containerd.runc.v2"
 assert r["options"]["BinaryName"] == "/usr/local/bin/permabox"
-assert r["options"]["SystemdCgroup"] is True
+assert r["options"]["SystemdCgroup"] is False
 assert {"permabox.io/persist", "permabox.io/container"} <= set(r["pod_annotations"])
 '
 smoke_lifecycle
