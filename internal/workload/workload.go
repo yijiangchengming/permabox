@@ -7,29 +7,17 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"regexp"
 	"time"
-)
 
-type Owner struct {
-	Namespace string    `json:"namespace"`
-	Kind      string    `json:"kind"`
-	Name      string    `json:"name"`
-	UID       string    `json:"uid"`
-	Overrides Overrides `json:"gc_overrides,omitzero"`
-}
+	"github.com/yijiangchengming/permabox/internal/ownership"
+)
 
 const (
 	deleteAnnotation      = "permabox.io/gc-on-workload-delete"
 	scaleToZeroAnnotation = "permabox.io/gc-on-scale-to-zero"
 )
 
-type Overrides struct {
-	Delete string `json:"delete,omitempty"`
-	Zero   string `json:"zero,omitempty"`
-}
-
-func readOverrides(annotations map[string]string) Overrides {
+func readOverrides(annotations map[string]string) ownership.Overrides {
 	read := func(key string) string {
 		value, exists := annotations[key]
 		if !exists {
@@ -40,10 +28,10 @@ func readOverrides(annotations map[string]string) Overrides {
 		}
 		return "false"
 	}
-	return Overrides{Delete: read(deleteAnnotation), Zero: read(scaleToZeroAnnotation)}
+	return ownership.Overrides{Delete: read(deleteAnnotation), Zero: read(scaleToZeroAnnotation)}
 }
 
-func (o Overrides) Apply(onDelete, onZero bool) (bool, bool) {
+func ApplyOverrides(o ownership.Overrides, onDelete, onZero bool) (bool, bool) {
 	if o.Delete != "" {
 		onDelete = o.Delete == "true"
 	}
@@ -51,13 +39,6 @@ func (o Overrides) Apply(onDelete, onZero bool) (bool, bool) {
 		onZero = o.Zero == "true"
 	}
 	return onDelete, onZero
-}
-
-var namePattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$`)
-
-func (o Owner) Valid() bool {
-	return namePattern.MatchString(o.Namespace) && namePattern.MatchString(o.Name) && o.UID != "" &&
-		o.Kind == "StatefulSet"
 }
 
 type reference struct {
@@ -95,7 +76,7 @@ var collection = map[string]string{
 
 func resourcePath(kind, namespace, name string) (string, error) {
 	resource, ok := collection[kind]
-	if !ok || !namePattern.MatchString(namespace) || !namePattern.MatchString(name) {
+	if !ok || !ownership.ValidName(namespace) || !ownership.ValidName(name) {
 		return "", errors.New("invalid Kubernetes resource identity")
 	}
 	prefix := "/apis/apps/v1"
@@ -144,7 +125,7 @@ func controller(obj object) reference {
 	var owner reference
 	for _, ref := range obj.Metadata.References {
 		if ref.Controller {
-			if owner.Controller || ref.APIVersion != "apps/v1" || ref.UID == "" || !namePattern.MatchString(ref.Name) {
+			if owner.Controller || ref.APIVersion != "apps/v1" || ref.UID == "" || !ownership.ValidName(ref.Name) {
 				return reference{}
 			}
 			owner = ref
@@ -153,26 +134,26 @@ func controller(obj object) reference {
 	return owner
 }
 
-func (c Client) Resolve(ctx context.Context, namespace, pod, uid string) (Owner, error) {
+func (c Client) Resolve(ctx context.Context, namespace, pod, uid string) (ownership.Owner, error) {
 	if uid == "" {
-		return Owner{}, nil
+		return ownership.Owner{}, nil
 	}
 	obj, err := c.get(ctx, "Pod", namespace, pod)
 	if errors.Is(err, errNotFound) {
-		return Owner{}, nil
+		return ownership.Owner{}, nil
 	}
 	if err != nil || obj.Metadata.UID != uid {
-		return Owner{}, err
+		return ownership.Owner{}, err
 	}
 	ref := controller(obj)
 	if ref.Kind != "StatefulSet" {
-		return Owner{}, nil
+		return ownership.Owner{}, nil
 	}
-	return Owner{Namespace: namespace, Kind: ref.Kind, Name: ref.Name, UID: ref.UID,
+	return ownership.Owner{Namespace: namespace, Kind: ref.Kind, Name: ref.Name, UID: ref.UID,
 		Overrides: readOverrides(obj.Metadata.Annotations)}, nil
 }
 
-func (c Client) Reclaim(ctx context.Context, owner Owner, onDelete, onZero bool) (bool, error) {
+func (c Client) Reclaim(ctx context.Context, owner ownership.Owner, onDelete, onZero bool) (bool, error) {
 	if !(onDelete || onZero) || !owner.Valid() {
 		return false, nil
 	}

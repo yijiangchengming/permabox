@@ -1,6 +1,6 @@
 //go:build linux
 
-package main
+package lifecycle
 
 import (
 	"bytes"
@@ -45,6 +45,52 @@ func TestManagedDeleteRetainsStateUntilSuccess(t *testing.T) {
 		_, err := os.Stat(journal)
 		if (exit == "17" && err != nil) || (exit == "0" && !os.IsNotExist(err)) {
 			t.Fatalf("journal after %s: %v", exit, err)
+		}
+	}
+}
+
+func TestManagedStartCommitsOwnershipOnlyAfterSuccess(t *testing.T) {
+	base := privateStateDir(t)
+	slot := filepath.Join(base, "store", "default", "app-0")
+	if err := os.MkdirAll(slot, 0700); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(slot, ".permabox-workload.json")
+	oldOwner := `{"namespace":"default","kind":"StatefulSet","name":"app","uid":"old"}`
+	newOwner := `{"namespace":"default","kind":"StatefulSet","name":"app","uid":"new"}`
+	ns, err := os.Readlink("/proc/self/ns/mnt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal, err := json.Marshal(map[string]any{
+		"mount_namespace": ns, "root": filepath.Join(base, "rootfs"), "slot": slot,
+		"pending_workload_owner": json.RawMessage(newOwner),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(base, "id.json"), journal, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(marker, []byte(oldOwner), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		status string
+		code   int
+		owner  string
+	}{{"17", 17, "old"}, {"0", 0, "new"}} {
+		out, stderr, code := call(t, base, tc.status, "start", "id")
+		if out != "start\nid\nforwarded\n" || stderr != "runtime stderr\n" || code != tc.code {
+			t.Fatalf("start: stdout=%q stderr=%q exit=%d; want %d", out, stderr, code, tc.code)
+		}
+		var got struct{ UID string }
+		data, err := os.ReadFile(marker)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(data, &got); err != nil || got.UID != tc.owner {
+			t.Fatalf("owner after start exit %d = %q (%v); want %q", code, got.UID, err, tc.owner)
 		}
 	}
 }
@@ -153,11 +199,11 @@ func TestWrapperHelper(t *testing.T) {
 			break
 		}
 	}
-	cfg := config.Config{StorageRoot: filepath.Join(base, "store"), Runtime: filepath.Join(base, "fake-runtime"), LogFile: filepath.Join(base, "wrapper.log"), Annotation: "permabox.io/persist"}
+	cfg := config.Config{StorageRoot: filepath.Join(base, "store"), Runtime: filepath.Join(base, "fake-runtime"), Annotation: "permabox.io/persist"}
 	cfg.UnderlyingRuntimes = map[string]string{"alternate": filepath.Join(base, "alternate")}
 	changed := filepath.Join(base, "changed-default")
 	if _, err := os.Stat(changed); err == nil {
 		cfg.Runtime = changed
 	}
-	os.Exit(run(cfg, mount.New(base), args))
+	os.Exit(Run(cfg, mount.New(base), args, t.Logf))
 }

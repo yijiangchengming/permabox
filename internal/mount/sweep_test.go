@@ -11,13 +11,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yijiangchengming/permabox/internal/workload"
+	"github.com/yijiangchengming/permabox/internal/ownership"
 )
 
 func TestSweepWorkloadProtectsReusedAndUntrackedSlots(t *testing.T) {
 	m, _, root, slot := fixture(t)
 	store := filepath.Dir(filepath.Dir(slot))
-	owner := workload.Owner{Namespace: "namespace", Kind: "StatefulSet", Name: "app", UID: "app-uid"}
+	owner := ownership.Owner{Namespace: "namespace", Kind: "StatefulSet", Name: "app", UID: "app-uid"}
 	if _, err := m.PrepareOwned("first", root, slot, "app", owner); err != nil {
 		t.Fatal(err)
 	}
@@ -29,29 +29,29 @@ func TestSweepWorkloadProtectsReusedAndUntrackedSlots(t *testing.T) {
 	}
 	legacy := filepath.Join(filepath.Dir(slot), "legacy")
 	prepareReleasedSlot(t, legacy, time.Now())
-	calls := 0
-	if err := m.SweepWorkloads([]string{store}, 0, time.Now(), func(got workload.Owner) (bool, error) {
-		calls++
-		if got != owner {
-			t.Fatalf("owner = %+v", got)
-		}
-		// Recreate and release the same slot while the API query is in flight.
-		if calls == 1 {
-			if _, err := m.PrepareOwned("second", root, slot, "app", owner); err != nil {
-				t.Fatal(err)
-			}
-			if err := m.Cleanup("second"); err != nil {
-				t.Fatal(err)
-			}
-		}
-		return true, nil
-	}); err != nil || calls != 2 {
-		t.Fatalf("sweep = %v; calls = %d", err, calls)
+	roots := []string{store}
+	candidates, err := m.DiscoverReleased(roots, "", 0, time.Now())
+	if err != nil || len(candidates) != 1 || candidates[0].Owner() != owner {
+		t.Fatalf("discover = %+v, %v", candidates, err)
+	}
+	// Recreate and release the same slot while the policy is being evaluated.
+	if _, err := m.PrepareOwned("second", root, slot, "app", owner); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Cleanup("second"); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.RetireReleased(roots, "", time.Now(), candidates); err != nil {
+		t.Fatal(err)
 	}
 	if _, err := os.Stat(slot); err != nil {
 		t.Fatal(err)
 	}
-	if err := m.SweepWorkloads([]string{store}, 0, time.Now(), func(workload.Owner) (bool, error) { return true, nil }); err != nil {
+	candidates, err = m.DiscoverReleased(roots, "", 0, time.Now())
+	if err != nil || len(candidates) != 1 || candidates[0].Owner() != owner {
+		t.Fatalf("rediscover = %+v, %v", candidates, err)
+	}
+	if err := m.RetireReleased(roots, "", time.Now(), candidates); err != nil {
 		t.Fatal(err)
 	}
 	assertMissing(t, slot)
@@ -60,10 +60,10 @@ func TestSweepWorkloadProtectsReusedAndUntrackedSlots(t *testing.T) {
 	}
 }
 
-func TestWorkloadGCRechecksAndPreservesOwnerOfFailedCreate(t *testing.T) {
+func TestFailedCreatePreservesOwner(t *testing.T) {
 	m, _, root, slot := fixture(t)
 	roots := []string{filepath.Dir(filepath.Dir(slot))}
-	owner := workload.Owner{Namespace: "namespace", Kind: "StatefulSet", Name: "app", UID: "original"}
+	owner := ownership.Owner{Namespace: "namespace", Kind: "StatefulSet", Name: "app", UID: "original"}
 	if _, err := m.PrepareOwned("first", root, slot, "app", owner); err != nil {
 		t.Fatal(err)
 	}
@@ -81,18 +81,9 @@ func TestWorkloadGCRechecksAndPreservesOwnerOfFailedCreate(t *testing.T) {
 	if err := m.Cleanup("failed-create"); err != nil {
 		t.Fatal(err)
 	}
-	calls := 0
-	if err := m.SweepWorkloads(roots, 0, time.Now(), func(got workload.Owner) (bool, error) {
-		if got != owner {
-			t.Fatalf("failed create changed workload ownership: %+v", got)
-		}
-		calls++
-		return calls == 1, nil // Scales up before the rule is confirmed again.
-	}); err != nil || calls != 2 {
-		t.Fatalf("sweep = %v; policy checks = %d", err, calls)
-	}
-	if _, err := os.Stat(slot); err != nil {
-		t.Fatal(err)
+	candidates, err := m.DiscoverReleased(roots, "", 0, time.Now())
+	if err != nil || len(candidates) != 1 || candidates[0].Owner() != owner {
+		t.Fatalf("discover after failed create = %+v, %v", candidates, err)
 	}
 }
 

@@ -9,6 +9,8 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
+
+	"github.com/yijiangchengming/permabox/internal/ownership"
 )
 
 func TestPodAnnotationsOverrideWorkloadDefaults(t *testing.T) {
@@ -33,18 +35,18 @@ func TestPodAnnotationsOverrideWorkloadDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var saved Owner
+	var saved ownership.Owner
 	if err := json.Unmarshal(data, &saved); err != nil {
 		t.Fatal(err)
 	}
-	if del, zero := saved.Overrides.Apply(false, true); !del || zero {
+	if del, zero := ApplyOverrides(saved.Overrides, false, true); !del || zero {
 		t.Fatalf("round-tripped overrides: delete=%v, zero=%v", del, zero)
 	}
 	obj, err := client.get(context.Background(), "Pod", "test", "pod")
 	if err != nil || len(obj.Metadata.Annotations) != 2 {
 		t.Fatalf("bridge exposed unexpected metadata: %+v, %v", obj.Metadata.Annotations, err)
 	}
-	if del, zero := readOverrides(map[string]string{scaleToZeroAnnotation: ""}).Apply(true, true); !del || zero {
+	if del, zero := ApplyOverrides(readOverrides(map[string]string{scaleToZeroAnnotation: ""}), true, true); !del || zero {
 		t.Fatalf("omitted / invalid overrides: delete=%v, zero=%v", del, zero)
 	}
 }
@@ -68,7 +70,7 @@ func TestUnixBridgePreservesAuthoritativeNotFound(t *testing.T) {
 	defer server.Close()
 	go server.Serve(listener)
 	client := UnixClient(path)
-	if ok, err := client.Reclaim(context.Background(), Owner{Namespace: "test", Kind: "StatefulSet", Name: "app", UID: "old-uid"}, true, false); err != nil || !ok {
+	if ok, err := client.Reclaim(context.Background(), ownership.Owner{Namespace: "test", Kind: "StatefulSet", Name: "app", UID: "old-uid"}, true, false); err != nil || !ok {
 		t.Fatalf("bridge reclaim = %v, %v", ok, err)
 	}
 	for _, path := range []string{
@@ -112,7 +114,7 @@ func TestResolveStatefulSetOwner(t *testing.T) {
 			defer server.Close()
 			c := Client{base: server.URL, http: server.Client()}
 			got, err := c.Resolve(context.Background(), "test", "pod", tc.uid)
-			if err != nil || got.Kind != tc.kind || (tc.kind != "" && got != (Owner{Namespace: "test", Kind: tc.kind, Name: "app", UID: "app-id"})) {
+			if err != nil || got.Kind != tc.kind || (tc.kind != "" && got != (ownership.Owner{Namespace: "test", Kind: tc.kind, Name: "app", UID: "app-id"})) {
 				t.Fatalf("owner = %+v, %v", got, err)
 			}
 		})
@@ -142,7 +144,7 @@ func TestPolicyRequiresVerifiedWorkloadState(t *testing.T) {
 			}))
 			defer s.Close()
 			c := Client{base: s.URL, http: s.Client()}
-			owner := Owner{Namespace: "test", Kind: "StatefulSet", Name: "app", UID: "app-id"}
+			owner := ownership.Owner{Namespace: "test", Kind: "StatefulSet", Name: "app", UID: "app-id"}
 			for _, p := range []struct{ del, scale, want bool }{{true, true, tc.want}, {true, false, tc.deleteOnly}, {false, true, tc.scaleOnly}, {false, false, false}} {
 				got, _ := c.Reclaim(context.Background(), owner, p.del, p.scale)
 				if got != p.want {

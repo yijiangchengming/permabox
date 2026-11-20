@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/yijiangchengming/permabox/internal/oci"
-	"github.com/yijiangchengming/permabox/internal/workload"
+	"github.com/yijiangchengming/permabox/internal/ownership"
 )
 
 type Manager struct {
@@ -24,13 +24,13 @@ type Manager struct {
 func New(dir string) Manager { return Manager{Dir: dir, sys: linux{}} }
 
 type record struct {
-	Namespace    string          `json:"mount_namespace"`
-	Root         string          `json:"root"`
-	Slot         string          `json:"slot"`
-	LowerID      int             `json:"lower_mount_id,omitempty"`
-	OverlayID    int             `json:"overlay_mount_id,omitempty"`
-	ReleasedAt   time.Time       `json:"released_at,omitempty"`
-	PendingOwner *workload.Owner `json:"pending_workload_owner,omitempty"`
+	Namespace    string           `json:"mount_namespace"`
+	Root         string           `json:"root"`
+	Slot         string           `json:"slot"`
+	LowerID      int              `json:"lower_mount_id,omitempty"`
+	OverlayID    int              `json:"overlay_mount_id,omitempty"`
+	ReleasedAt   time.Time        `json:"released_at,omitempty"`
+	PendingOwner *ownership.Owner `json:"pending_workload_owner,omitempty"`
 }
 
 func (r record) MarshalJSON() ([]byte, error) {
@@ -52,10 +52,10 @@ func (m Manager) alias(id string) string   { return filepath.Join(m.Dir, id+".lo
 
 // Prepare returns true only when this call installed a new overlay.
 func (m Manager) Prepare(id, root, slot, container string) (bool, error) {
-	return m.PrepareOwned(id, root, slot, container, workload.Owner{})
+	return m.PrepareOwned(id, root, slot, container, ownership.Owner{})
 }
 
-func (m Manager) PrepareOwned(id, root, slot, container string, owner workload.Owner) (bool, error) {
+func (m Manager) PrepareOwned(id, root, slot, container string, owner ownership.Owner) (bool, error) {
 	if !oci.ValidID(id) {
 		return false, errors.New("invalid container ID")
 	}
@@ -155,7 +155,7 @@ func (m Manager) PrepareOwned(id, root, slot, container string, owner workload.O
 	return true, nil
 }
 
-// ActivateOwnership commits the owner once OCI start confirms create was accepted.
+// ActivateOwnership commits the pending owner after the runtime starts successfully.
 func (m Manager) ActivateOwnership(id string) error {
 	if !oci.ValidID(id) {
 		return errors.New("invalid container ID")

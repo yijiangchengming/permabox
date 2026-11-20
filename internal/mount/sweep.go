@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/yijiangchengming/permabox/internal/oci"
-	"github.com/yijiangchengming/permabox/internal/workload"
+	"github.com/yijiangchengming/permabox/internal/ownership"
 )
 
 const (
@@ -22,78 +22,42 @@ const (
 	workloadMarker = ".permabox-workload.json"
 )
 
-type releasedSlot struct {
-	Owner workload.Owner
-	At    time.Time
-	File  os.FileInfo
+// ReleasedSlot identifies one release generation eligible for a policy check.
+type ReleasedSlot struct {
+	path  string
+	owner ownership.Owner
+	at    time.Time
+	file  os.FileInfo
 }
 
-type slotFilter func(path string, released releasedSlot) bool
-type reclaimOwner func(workload.Owner) (bool, error)
+func (s ReleasedSlot) Owner() ownership.Owner { return s.owner }
 
-// SweepWorkloads collects candidates under the mount lock, queries their
-// owners without the lock, then checks the same release generation again.
-func (m Manager) SweepWorkloads(roots []string, ttl time.Duration, now time.Time, reclaim reclaimOwner) error {
-	return m.sweepWorkloads(roots, "", ttl, now, reclaim)
-}
+type slotFilter func(ReleasedSlot) bool
 
-func (m Manager) SweepReleasedWorkload(roots []string, slot string, reclaim reclaimOwner) error {
-	if slot == "" {
-		return nil
-	}
-	return m.sweepWorkloads(roots, slot, 0, time.Now(), reclaim)
-}
-
-func (m Manager) sweepWorkloads(roots []string, target string, ttl time.Duration, now time.Time, reclaim reclaimOwner) error {
-	candidates := make(map[string]releasedSlot)
-	result := m.sweep(roots, target, ttl, now, func(path string, s releasedSlot) bool {
-		candidates[path] = s
+// DiscoverReleased collects policy candidates while performing the regular TTL sweep.
+// An empty target selects all storage slots.
+func (m Manager) DiscoverReleased(roots []string, target string, ttl time.Duration, now time.Time) ([]ReleasedSlot, error) {
+	var candidates []ReleasedSlot
+	err := m.sweep(roots, target, ttl, now, func(s ReleasedSlot) bool {
+		candidates = append(candidates, s)
 		return false
 	})
-	checked := make(map[workload.Owner]bool)
-	approved := make(map[string]releasedSlot)
-	for path, slot := range candidates {
-		ok, exists := checked[slot.Owner]
-		if !exists {
-			var err error
-			ok, err = reclaim(slot.Owner)
-			if err != nil {
-				result = errors.Join(result, err)
-				ok = false
-			}
-			checked[slot.Owner] = ok
-		}
-		if ok {
-			approved[path] = slot
-		}
-	}
+	return candidates, err
+}
+
+// RetireReleased rechecks the approved release generations under the mount lock.
+func (m Manager) RetireReleased(roots []string, target string, now time.Time, approved []ReleasedSlot) error {
 	if len(approved) == 0 {
-		return result
+		return nil
 	}
-	// Recheck before retirement so a scale-up during discovery cancels GC.
-	clear(checked)
-	for path, slot := range approved {
-		ok, exists := checked[slot.Owner]
-		if !exists {
-			var err error
-			ok, err = reclaim(slot.Owner)
-			if err != nil {
-				result = errors.Join(result, err)
-				ok = false
-			}
-			checked[slot.Owner] = ok
-		}
-		if !ok {
-			delete(approved, path)
-		}
+	byPath := make(map[string]ReleasedSlot, len(approved))
+	for _, s := range approved {
+		byPath[s.path] = s
 	}
-	if len(approved) == 0 {
-		return result
-	}
-	return errors.Join(result, m.sweep(roots, target, 0, now, func(path string, s releasedSlot) bool {
-		a, ok := approved[path]
-		return ok && s.Owner == a.Owner && s.At.Equal(a.At) && os.SameFile(s.File, a.File)
-	}))
+	return m.sweep(roots, target, 0, now, func(s ReleasedSlot) bool {
+		a, ok := byPath[s.path]
+		return ok && s.owner == a.owner && s.at.Equal(a.at) && os.SameFile(s.file, a.file)
+	})
 }
 
 // Sweep retries released journals and recovers stale records in this mount
@@ -277,12 +241,12 @@ func retireSlots(root, target, stateDir string, protectedRoots []string, live []
 				continue
 			}
 			if ttl <= 0 || now.Sub(released) < ttl {
-				var owner workload.Owner
+				var owner ownership.Owner
 				if filter == nil || !readMarker(filepath.Join(slot, workloadMarker), &owner) || !owner.Valid() || owner.Namespace != namespace.Name() {
 					continue
 				}
 				info, err := os.Lstat(marker)
-				if err != nil || !filter(slot, releasedSlot{owner, released, info}) {
+				if err != nil || !filter(ReleasedSlot{path: slot, owner: owner, at: released, file: info}) {
 					continue
 				}
 			}
