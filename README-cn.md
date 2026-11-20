@@ -47,4 +47,4 @@ make check
 | [`internal`](internal) | 配置、挂载生命周期和 Kubernetes 归属检查 |
 | [`deploy`](deploy) | Helm Chart、K3s 安装器和 containerd 示例 |
 
-开发流程和 GHCR 镜像发布方式见 [贡献与发布指南](CONTRIBUTING.md)。
+GitHub 协作流程和 GHCR 镜像发布方式见 [中文贡献与发布指南](CONTRIBUTING-cn.md)。

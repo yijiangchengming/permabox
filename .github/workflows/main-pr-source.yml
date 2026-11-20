@@ -1,0 +1,24 @@
+name: Main PR policy
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, reopened, synchronize, edited]
+
+permissions: {}
+
+jobs:
+  source:
+    name: main-pr-source
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require the upstream dev branch
+        shell: bash
+        run: |
+          if ! jq -e '.pull_request | .head.ref == "dev"
+            and .base.repo.id != null
+            and .head.repo.id == .base.repo.id' "$GITHUB_EVENT_PATH" > /dev/null; then
+            echo "::error::Open work PRs against dev. Only this repository's dev may merge into main."
+            exit 1
+          fi
