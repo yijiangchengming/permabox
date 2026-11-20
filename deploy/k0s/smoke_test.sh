@@ -88,10 +88,10 @@ k wait --for=condition=Ready "node/$node" --timeout=180s
 node_exec "$containerd" --version
 node_exec "$runtime" --version
 node_exec grep -Fx '# k0s_managed=true' "$config"
+node_exec grep -Fx 'version = 3' "$drop_in"
 node_exec "$containerd" --config "$config" config dump | python3 -c '
 import sys, tomllib
 cfg = tomllib.loads(sys.stdin.read())
-assert cfg["version"] == 3
 r = cfg["plugins"]["io.containerd.cri.v1.runtime"]["containerd"]["runtimes"]["permabox"]
 assert r["runtime_type"] == "io.containerd.runc.v2"
 assert r["options"]["BinaryName"] == "/usr/local/bin/permabox"
