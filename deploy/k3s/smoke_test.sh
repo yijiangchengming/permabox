@@ -36,6 +36,9 @@ daemonset_ready() {
 
 installer_ready() { daemonset_ready permabox-installer; }
 bridge_ready() { daemonset_ready permabox-bridge; }
+runtime_class_absent() {
+  [[ -z $(k get runtimeclass permabox --ignore-not-found -o name 2>/dev/null) ]]
+}
 bridge_uid() {
   k -n "$installer_ns" get pods -l app.kubernetes.io/name=permabox-bridge -o json |
     jq -er '.items | select(length == 1) | .[0].metadata.uid'
@@ -126,5 +129,4 @@ cri_info | jq -e '.config.containerd.runtimes | type == "object" and (has("perma
 sudo test ! -e /opt/permabox-k3s/runtime
 sudo test -f /opt/permabox-k3s/create-closed
 helm uninstall permabox -n "$installer_ns" --wait --timeout 2m
-runtime_class=$(k get runtimeclass permabox --ignore-not-found -o name)
-test -z "$runtime_class"
+wait_for runtime_class_absent
