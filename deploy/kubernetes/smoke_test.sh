@@ -44,7 +44,7 @@ cleanup() {
 
 trap cleanup EXIT
 
-install -d -o root -g root -m 0755 "$work/storage"
+sudo install -d -o root -g root -m 0755 "$work/storage"
 {
   printf '%s\n' 'kind: Cluster' 'apiVersion: kind.x-k8s.io/v1alpha4' 'nodes:' '  - role: control-plane' '    extraMounts:'
   printf '      - hostPath: %s\n        containerPath: /var/lib/permabox\n' "$work/storage"
