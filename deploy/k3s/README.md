@@ -66,12 +66,12 @@ The chart applies the same `nodeSelector` and `tolerations` to the installer and
 | `underlyingRuntimes` | `{}`. Maps runtime aliases to absolute binary paths on the host. |
 | `gcIdleTTL` | `"0s"`. A Go duration; by default, GC retains released data and still retries stale cleanup. |
 | `gcOnWorkloadDelete` | `false`. Enable to reclaim safely released writable layers when their StatefulSet is deleted. |
-| `gcOnScaleToZero` | `false`. Enable to reclaim safely released writable layers when their StatefulSet has `spec.replicas: 0`. |
+| `gcOnScaleToZero` | `false`. Enable to reclaim released writable layers when their StatefulSet has `spec.replicas: 0`. Leave disabled and avoid enabling the workload override when data must survive scale-to-zero. |
 | `gcWorkloadAnnotations` | `false`. Enable to let Pod template annotations override the two workload GC defaults individually. |
 | `gcIntervalSeconds` | `60`. A positive integer giving the wait in seconds before each GC sweep. |
 | `persistAnnotation` | `permabox.io/persist`. Update the workload Pod annotations if you change this key. |
 
-Use `permabox.io/storage-root` to set a storage alias for the container selected for persistence. Use `permabox.io/underlying-runtime` to set a runtime alias for the workload containers. The sandbox uses the default runtime from the time it was created. See [storage and runtime aliases](../README.md#1-install-on-the-target-node). When upgrading, use a new release image tag or push your custom build with a new tag. While container records still exist, the installer permits changes to the workload GC switches alone. Stop PermaBox workloads before changing other runtime settings.
+Use `permabox.io/storage-root` to set a storage alias for the container selected for persistence. Workload containers can select a runtime alias with `permabox.io/underlying-runtime` when their namespace is listed in `trustedNamespaces`. The sandbox uses the default runtime from the time it was created. See [storage and runtime aliases](../README.md#1-install-on-the-target-node). When upgrading, use a new release image tag or push your custom build with a new tag. While container records still exist, the installer permits changes to the workload GC switches alone. Stop PermaBox workloads before changing other runtime settings.
 
 The installer runs `permabox validate-config` on the staged configuration before publishing it. The default runtime and any runtime alias must not point to `/opt/permabox-k3s/runtime`, because that would call PermaBox recursively.
 

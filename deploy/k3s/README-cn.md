@@ -64,12 +64,12 @@ Chart 将同一套 `nodeSelector` 和 `tolerations` 应用于安装器和 Runtim
 | `underlyingRuntimes` | `{}`；运行时别名到宿主机绝对二进制路径的映射 |
 | `gcIdleTTL` | `"0s"`；Go 时长，默认保留已释放的持久化数据，GC 仍重试残留清理 |
 | `gcOnWorkloadDelete` | `false`；设为 `true` 后，删除 StatefulSet 时回收其已安全释放的写层 |
-| `gcOnScaleToZero` | `false`；设为 `true` 后，StatefulSet 的 `spec.replicas` 为 `0` 时回收其已安全释放的写层 |
+| `gcOnScaleToZero` | 默认 `false`。开启后，StatefulSet 的 `spec.replicas` 为 `0` 时回收其已释放的写层。若需保留缩到零后的数据，请保持关闭，并避免通过工作负载注解启用。 |
 | `gcWorkloadAnnotations` | `false`；设为 `true` 后，允许 Pod 模板注解单独覆盖上面两项默认值 |
 | `gcIntervalSeconds` | `60`；每次 GC 前等待的秒数（正整数） |
 | `persistAnnotation` | `permabox.io/persist`；更改后须同步修改业务 Pod |
 
-在 Pod 上用 `permabox.io/storage-root` 为选中的持久化容器指定存储别名，用 `permabox.io/underlying-runtime` 为业务容器指定运行时别名；sandbox 使用创建时的默认运行时。参见[别名配置](../README-cn.md#1-安装到目标节点)。升级时请使用新的发布镜像标签，或用新标签推送自定义构建。仍存在容器记录时，安装器允许单独修改工作负载回收开关，修改其他运行时配置前请先停止 PermaBox 工作负载。
+在 Pod 上用 `permabox.io/storage-root` 为选中的持久化容器指定存储别名。命名空间列入 `trustedNamespaces` 的 Pod 可以用 `permabox.io/underlying-runtime` 为业务容器指定运行时别名。sandbox 使用创建时的默认运行时。参见[别名配置](../README-cn.md#1-安装到目标节点)。升级时请使用新的发布镜像标签，或用新标签推送自定义构建。仍存在容器记录时，安装器允许单独修改工作负载回收开关，修改其他运行时配置前请先停止 PermaBox 工作负载。
 
 安装器通过 `permabox validate-config` 验证暂存的配置，验证成功后才发布。默认运行时和别名均不得指向安装器包装器 `/opt/permabox-k3s/runtime`，否则会递归调用 PermaBox。
 
