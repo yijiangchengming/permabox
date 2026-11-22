@@ -58,7 +58,7 @@ func prepareInstallerState(path string) error {
 			return err
 		}
 		if !lock.Mode().IsRegular() || lock.Mode().Perm()&0022 != 0 || lock.Sys().(*syscall.Stat_t).Uid != uid {
-			return fmt.Errorf("unsafe installer lock %s", name)
+			return fmt.Errorf("unsafe installer lock %s (mode %s, uid %d)", name, lock.Mode(), lock.Sys().(*syscall.Stat_t).Uid)
 		}
 	}
 	transaction, err := trustedpath.OpenChild(dir, ".transaction", false, true)
