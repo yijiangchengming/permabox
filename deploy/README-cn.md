@@ -45,7 +45,7 @@ underlying_runtimes:
   gpu: /usr/bin/nvidia-container-runtime
 ```
 
-在 Pod（或 StatefulSet 的 `spec.template.metadata.annotations`）上设置 `permabox.io/storage-root: fast`，为选中持久化的业务容器使用 `fast` 对应的写层根目录。设置 `permabox.io/underlying-runtime: gpu`，为 Pod 的业务容器选择 `gpu` 运行时，即使业务容器未开启持久化；sandbox 始终使用默认运行时。省略注解时使用 `storage_root` 和 `underlying_runtime`。别名只是路径选择，更改存储根目录不会迁移旧数据。请确保每个目标节点上的存储为本地文件系统、运行时二进制已安装且可以执行。
+在 Pod（或 StatefulSet 的 `spec.template.metadata.annotations`）上设置 `permabox.io/storage-root: fast`，为选中持久化的业务容器使用 `fast` 对应的写层根目录。设置 `permabox.io/underlying-runtime: gpu`，为 Pod 的业务容器选择 `gpu` 运行时，即使业务容器未开启持久化。运行时别名要求 Pod 的命名空间列入 `trusted_namespaces`。共享集群应通过准入策略限制哪些工作负载可以使用该 RuntimeClass 和运行时别名。sandbox 始终使用默认运行时。省略注解时使用 `storage_root` 和 `underlying_runtime`。别名只是路径选择，更改存储根目录不会迁移旧数据。请确保每个目标节点上的存储为本地文件系统、运行时二进制已安装且可以执行。
 
 ## 2. 注册 containerd handler
 
@@ -151,7 +151,7 @@ sudo crictl info
 
 默认 `gc_idle_ttl: "0s"` 保留已释放的持久化数据，周期 GC 仍会重试能够安全确认的残留清理。若设为正的 Go 时长（如 `"72h"`），从最后一次确认写层已释放时开始计算空闲时间；达到时长后，下一次符合条件的 GC 才会删除数据。在到期前，同一节点、同一存储根、同一命名空间和 Pod 名的替换实例仍可恢复原写层。GC 会保留没有生命周期标记的旧数据，直到后续成功使用并释放；对仍活跃、可能仍挂载或状态无法确认的记录和数据会保守跳过。共享存储不受支持。
 
-StatefulSet 删除和缩到 0 的回收默认关闭。开启后，删除可在下一次符合条件的扫描回收已释放写层；缩到 0 则至少要等首次批准一分钟，并在后续扫描中按工作负载逐组复核。批准过期或写层已复用时，本次不会退休该写层。最终 API 检查和节点磁盘操作无法原子执行。空闲 TTL 是独立策略。手动部署即使关闭回收也需要元数据桥接来核验身份。将 `workload_socket` 设为桥接 socket 的宿主机绝对路径，目录权限设为 `0700`；桥接的 ServiceAccount 只需要 Pod 和 StatefulSet 的 `get` 权限。[K3s Helm 安装器](k3s/README-cn.md)会自动部署桥接。
+StatefulSet 删除和缩到 0 的回收默认关闭。开启后，删除可在下一次符合条件的扫描回收已释放写层；缩到 0 则至少要等首次批准一分钟，并在后续扫描中按工作负载逐组复核。批准过期或写层已复用时，本次不会退休该写层。若扩容发生在最终 API 检查与磁盘操作之间，已释放写层仍可能丢失。若需保留缩到 0 后的数据，请保持 `gc_on_scale_to_zero` 关闭，并避免通过工作负载注解启用。空闲 TTL 是独立策略。手动部署即使关闭回收也需要元数据桥接来核验身份。将 `workload_socket` 设为桥接 socket 的宿主机绝对路径，目录权限设为 `0700`；桥接的 ServiceAccount 只需要 Pod 和 StatefulSet 的 `get` 权限。[K3s Helm 安装器](k3s/README-cn.md)会自动部署桥接。
 
 节点重启后，若写层最近一次启动已确认，且无日志或挂载引用，GC 可以恢复释放记录。仅丢失运行时日志不足以认定写层已释放。最近一次启动未确认时，只有从未确认使用、已记录释放且 `upper` 为空的写层才可按 TTL 回收。已有数据或来源不明的写层会保留；中断的删除可用写层目录之外的凭据继续清理。
 

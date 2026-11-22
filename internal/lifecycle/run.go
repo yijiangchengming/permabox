@@ -56,6 +56,10 @@ func Run(cfg config.Config, manager mount.Manager, args []string, report func(st
 				return 1
 			}
 			if options.RuntimeAlias != "" {
+				if options.Namespace == "" || !cfg.TrustsNamespace(options.Namespace) {
+					report("create %s: namespace %q is not trusted to select a runtime alias; check trusted_namespaces", inv.ID, options.Namespace)
+					return 1
+				}
 				var ok bool
 				runtime, ok = cfg.UnderlyingRuntimes[options.RuntimeAlias]
 				if !ok {
