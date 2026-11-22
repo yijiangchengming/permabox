@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Run on a disposable single-node K3s host with the CI installer image imported.
 set -euo pipefail
+trap 'printf "K3s smoke test failed at %s:%s: %s (exit %s)\n" "$0" "$LINENO" "$BASH_COMMAND" "$?" >&2' ERR
 
 chart=deploy/helm/permabox
 installer_ns=permabox-system
@@ -37,7 +38,9 @@ daemonset_ready() {
 installer_ready() { daemonset_ready permabox-installer; }
 bridge_ready() { daemonset_ready permabox-bridge; }
 runtime_class_absent() {
-  [[ -z $(k get runtimeclass permabox --ignore-not-found -o name 2>/dev/null) ]]
+  local runtime_class
+  runtime_class=$(k get runtimeclass permabox --ignore-not-found -o name 2>/dev/null) || return 1
+  [[ -z $runtime_class ]]
 }
 bridge_uid() {
   k -n "$installer_ns" get pods -l app.kubernetes.io/name=permabox-bridge -o json |
