@@ -30,7 +30,7 @@ Set `trusted_namespaces: [permabox-demo]` in the installed config to run the exa
 | `PERMABOX_CONFIG` | Config file path; defaults to `/etc/permabox/config.yaml` |
 | `PERMABOX_STORAGE_ROOT` | Overrides `storage_root` |
 | `PERMABOX_UNDERLYING_RUNTIME` | Overrides `underlying_runtime` |
-| `PERMABOX_LOG_FILE` | Overrides `log_file` |
+| `PERMABOX_LOG_FILE` | Overrides `log_file`. Use a regular file under directories writable only by trusted host administrators. Log paths ending in a symbolic link are rejected. |
 | `PERMABOX_PERSIST_ANNOTATION` | Overrides `persist_annotation` |
 | `PERMABOX_GC_IDLE_TTL` | Overrides `gc_idle_ttl` |
 
@@ -159,6 +159,8 @@ After a node reboot, GC can release a layer whose latest start was confirmed if 
 
 The same API bridge also supports overrides from Pod template annotations. Set `gc_workload_annotations: true` on the node and use the [same annotations as the Helm deployment](k3s/README.md#override-gc-per-workload).
 
+To disable both workload-based reclaim policies for existing released layers, set `gc_on_workload_delete`, `gc_on_scale_to_zero`, and `gc_workload_annotations` to `false` on every GC node. Layers already moved to the retirement directory remain eligible for deletion. Set `gc_idle_ttl: "0s"` as well if released layers must be kept indefinitely.
+
 On each manually configured node, use these systemd units to run `gc` periodically. The service must run as root and use the same config, environment overrides, and mount namespace as the runtime. The example assumes containerd uses the default config and does not isolate its mount namespace. If the runtime shim uses a separate mount namespace, run GC in that namespace.
 
 `/etc/systemd/system/permabox-gc.service`:
@@ -208,6 +210,8 @@ sudo /usr/local/bin/permabox --root "$RUNTIME_STATE_ROOT" delete --force "$OLD_C
 Set the variables to the values used by the shim and the failed container. Before resuming the workload, confirm that cleanup removed the record and the temporary lower mount. PermaBox refuses cleanup from a different mount namespace. Inspect the original namespace, or verify during node maintenance that it and its mounts are gone. Do not delete state files by hand to bypass a writable layer that is still in use.
 
 ## Security and image upgrades
+
+For a security update, pin the replacement image by digest and verify that the replacement starts with a clean writable layer before restoring application data. A storage alias pointing to an unused local root lets a StatefulSet keep its name while starting with a clean layer. Keep the prior layer for rollback under your backup and retention policy.
 
 - A node administrator must install and manage the wrapper because it mounts filesystems on the host. The example container is unprivileged, but runs as UID 0 to write to `/` and `/etc`, so it does not satisfy the Restricted Pod Security policy's non-root requirement. Use an authorized test namespace rather than relaxing admission policy for the whole cluster.
 - Allow only trusted workloads to use this RuntimeClass and its persistence annotations. You can enforce this with admission policy. With the Node authorizer and NodeRestriction enabled, the example label key prevents kubelets from assigning themselves that label. PermaBox verifies StatefulSet identity before reusing stored data. Restrict access to node data and back up and archive it as needed. Volumes, Secret projections, `/proc`, and other separate mounts have their own lifecycles.

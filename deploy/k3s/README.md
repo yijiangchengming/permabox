@@ -89,6 +89,8 @@ Deleting a Pod by hand, rolling out an update, or scaling to a nonzero replica c
 
 ### Override GC per workload
 
+To stop both workload-based reclaim policies for existing layers, set `gcOnWorkloadDelete=false`, `gcOnScaleToZero=false`, and `gcWorkloadAnnotations=false`. Already retired layers can still be deleted. Set `gcIdleTTL=0s` too if released layers must be retained indefinitely.
+
 Set `--set gcWorkloadAnnotations=true` in Helm, then add the desired annotations to the StatefulSet Pod template. You can enable a policy for an individual workload even when both global defaults are `false`:
 
 ```yaml

@@ -30,7 +30,7 @@ sudo test -x /usr/bin/runc
 | `PERMABOX_CONFIG` | 配置文件路径，默认 `/etc/permabox/config.yaml` |
 | `PERMABOX_STORAGE_ROOT` | 覆盖 `storage_root` |
 | `PERMABOX_UNDERLYING_RUNTIME` | 覆盖 `underlying_runtime` |
-| `PERMABOX_LOG_FILE` | 覆盖 `log_file` |
+| `PERMABOX_LOG_FILE` | 覆盖 `log_file`。请使用仅受信宿主机管理员可写目录下的普通文件。日志路径的末端为符号链接时会被拒绝。 |
 | `PERMABOX_PERSIST_ANNOTATION` | 覆盖 `persist_annotation` |
 | `PERMABOX_GC_IDLE_TTL` | 覆盖 `gc_idle_ttl` |
 
@@ -157,6 +157,8 @@ StatefulSet 删除和缩到 0 的回收默认关闭。开启后，删除可在�
 
 同一个 API 桥也支持 Pod 模板注解覆盖，节点设置 `gc_workload_annotations: true` 即可启用；[注解示例](k3s/README-cn.md#按工作负载覆盖回收策略)与 Helm 部署相同。
 
+如需对现有已释放写层关闭两项工作负载回收策略，请在每个运行 GC 的节点上将 `gc_on_workload_delete`、`gc_on_scale_to_zero` 和 `gc_workload_annotations` 都设为 `false`。已经移入回收目录的写层仍可能被删除。如需长期保留已释放写层，还应设置 `gc_idle_ttl: "0s"`。
+
 在每个手动部署的节点上，用下列 systemd 单元定期执行 `gc`。服务须以 root 运行，并与运行时使用相同的配置、环境覆盖和挂载命名空间。示例适用于使用默认配置、未隔离挂载命名空间的 containerd；如果 runtime shim 使用独立的挂载命名空间，请在其所在命名空间运行 GC。
 
 `/etc/systemd/system/permabox-gc.service`：
@@ -206,6 +208,8 @@ sudo /usr/local/bin/permabox --root "$RUNTIME_STATE_ROOT" delete --force "$OLD_C
 先将变量设置为该 shim 实际使用的值。清理成功后，确认记录和临时 lower 挂载均已移除，再恢复工作负载。跨挂载命名空间的清理会拒绝执行；应从原命名空间检查，或在节点维护期间核实原命名空间与相关挂载已经释放。不要通过手动删除状态文件绕过仍在使用的写层。
 
 ## 安全范围与镜像升级
+
+应用安全更新时，请固定新镜像的摘要，并在恢复应用数据前确认新容器使用干净的写层。可通过存储别名指定尚未使用的本地存储根目录，让 StatefulSet 保留原名称并使用新写层。按备份和保留策略保存旧写层，以备回滚。
 
 - 包装器在宿主机执行挂载，须由节点管理员安装和管理。示例容器为非特权容器；为了在 `/` 和 `/etc` 进行验证，示例以 UID 0 运行，因此不满足要求非 root 的 Restricted Pod Security 策略。只在授权的测试命名空间使用，不要放宽整个集群的准入策略。
 - 仅授权受信任的工作负载使用该 RuntimeClass 和持久化注解，可用准入策略限制其使用范围。启用 Node authorizer 与 NodeRestriction 时，示例的标签键可防止 kubelet 自行给节点设置该标签。PermaBox 在复用写层前核验 StatefulSet 身份；仍应限制节点数据访问，并备份和归档。根文件系统之外的卷、Secret 投影和 `/proc` 等挂载由各自的机制管理。
