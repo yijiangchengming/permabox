@@ -3,6 +3,7 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -76,6 +77,9 @@ func main() {
 	}
 	cfg, err := config.Load()
 	if err != nil {
+		if len(os.Args) == 2 && os.Args[1] == "validate-config" {
+			fmt.Fprintln(os.Stderr, err)
+		}
 		path := os.Getenv("PERMABOX_LOG_FILE")
 		if path == "" {
 			path = cfg.LogFile
