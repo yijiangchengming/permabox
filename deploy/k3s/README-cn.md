@@ -85,6 +85,8 @@ Chart 将同一套 `nodeSelector` 和 `tolerations` 应用于安装器和 Runtim
 
 ### 按工作负载覆盖回收策略
 
+如需对现有写层关闭两项工作负载回收策略，请将 `gcOnWorkloadDelete=false`、`gcOnScaleToZero=false` 和 `gcWorkloadAnnotations=false` 一并设置。已经移入回收目录的写层仍可能被删除。如需长期保留已释放写层，还应设置 `gcIdleTTL=0s`。
+
 通过 Helm 传入 `--set gcWorkloadAnnotations=true` 后，在 StatefulSet 的 Pod 模板中按需设置注解。即使两个全局默认值均为 `false`，也可以只为指定工作负载开启：
 
 ```yaml
