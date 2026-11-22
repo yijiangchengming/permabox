@@ -47,6 +47,8 @@ underlying_runtimes:
 
 On the Pod, or under `spec.template.metadata.annotations` in a StatefulSet, set `permabox.io/storage-root: fast` to use that storage root for the container selected for persistence. Set `permabox.io/underlying-runtime: gpu` to choose a runtime for the Pod's workload containers, even when persistence is disabled. Runtime aliases require the Pod namespace to be listed in `trusted_namespaces`. In shared clusters, use admission policy to restrict RuntimeClass and alias access to approved workloads. The sandbox always uses the default runtime. When the annotations are absent, PermaBox uses `storage_root` and `underlying_runtime`. Changing the storage alias does not migrate existing data. On each target node, ensure the storage is local and the configured runtime binaries are installed and executable.
 
+For production, put each configured storage root on a bounded filesystem separate from the node OS and runtime data. PermaBox writes outside the runtime's snapshot storage. Use host-managed block and inode quotas where supported, monitor both limits, and verify enforcement on the target filesystem. A dedicated filesystem limits node-wide impact, while per-slot quotas also limit contention between workloads sharing it.
+
 ## 2. Register the containerd handler
 
 Run `containerd --version` and identify the containerd instance and config file used by kubelet (usually `/etc/containerd/config.toml`). Back up the file, then merge the `permabox` table and its `options` subtable from the matching snippet. Keep the existing CRI, image, snapshotter, and default runtime settings, with a single top-level `version` key.

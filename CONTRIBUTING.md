@@ -52,7 +52,7 @@ GitHub Actions imports the installer image built from the current checkout into 
 ## Release an installer image
 
 1. Submit release preparation through a PR to `dev`. Update `version` in [Chart.yaml](deploy/helm/permabox/Chart.yaml) for chart changes and set `appVersion` to the installer image version the chart should default to. Promote `dev` to `main` through a reviewed PR, then tag the resulting reviewed commit on `main`.
-2. Push a new stable tag such as `v0.1.0`. Treat released tags as immutable.
+2. Push a new stable tag such as `v0.1.0`. Before running release CI, the workflow verifies that the tagged commit is in the history of upstream `main`. Use repository tag rules to restrict who may create stable tags and prevent updates or deletions.
 3. Verify that the **Publish installer image** workflow succeeds. It first runs CI, then publishes `linux/amd64` and `linux/arm64` to `ghcr.io/<owner>/<repo>-installer` (lowercase), with `0.1.0` and `sha-<full-commit-sha>` tags for this example. No `latest` tag is published. The workflow uses the repository's `GITHUB_TOKEN` and does not require a registry password secret.
 4. Check the package's visibility and verify a pull from the target environment. For a public deployment, make the package public explicitly; otherwise use registry credentials on the cluster. Publish release notes that identify the image tag, digest, and any upgrade steps.
 

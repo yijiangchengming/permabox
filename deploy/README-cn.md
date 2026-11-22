@@ -47,6 +47,8 @@ underlying_runtimes:
 
 在 Pod（或 StatefulSet 的 `spec.template.metadata.annotations`）上设置 `permabox.io/storage-root: fast`，为选中持久化的业务容器使用 `fast` 对应的写层根目录。设置 `permabox.io/underlying-runtime: gpu`，为 Pod 的业务容器选择 `gpu` 运行时，即使业务容器未开启持久化。运行时别名要求 Pod 的命名空间列入 `trusted_namespaces`。共享集群应通过准入策略限制哪些工作负载可以使用该 RuntimeClass 和运行时别名。sandbox 始终使用默认运行时。省略注解时使用 `storage_root` 和 `underlying_runtime`。别名只是路径选择，更改存储根目录不会迁移旧数据。请确保每个目标节点上的存储为本地文件系统、运行时二进制已安装且可以执行。
 
+生产环境应将各存储根目录放在容量受限的独立文件系统上，与节点系统盘和运行时数据隔离。PermaBox 写层位于运行时快照存储之外。请在支持的文件系统上通过宿主机配置块空间和 inode 配额，监控两项指标，并在目标文件系统验证配额是否生效。独立文件系统可限制对节点的影响，按写层设置配额还可限制共享该文件系统的工作负载之间的资源争用。
+
 ## 2. 注册 containerd handler
 
 用 `containerd --version` 确认版本，并确认 kubelet 使用的 containerd 实例及其实际配置文件（通常是 `/etc/containerd/config.toml`）。备份该文件，按实际配置格式合并下面一个片段中的 `permabox` 表及 `options` 子表；保留已有的 CRI、镜像、快照器及默认运行时设置，顶层 `version` 只写一次。
