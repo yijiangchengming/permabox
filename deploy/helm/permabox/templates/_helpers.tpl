@@ -2,6 +2,15 @@
 {{- printf "%s-installer" .Release.Name -}}
 {{- end -}}
 
+{{- define "permabox.bridgeName" -}}
+{{- printf "%s-bridge" .Release.Name -}}
+{{- end -}}
+
+{{- define "permabox.bridgeLabels" -}}
+app.kubernetes.io/name: permabox-bridge
+app.kubernetes.io/instance: {{ .Release.Name | quote }}
+{{- end -}}
+
 {{- define "permabox.workloadGCName" -}}
 {{- printf "%s-gc-%s" .Release.Name (.Release.Namespace | sha256sum | trunc 10) -}}
 {{- end -}}

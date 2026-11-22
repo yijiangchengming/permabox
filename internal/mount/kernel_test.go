@@ -7,8 +7,9 @@ import (
 	"path/filepath"
 	"syscall"
 	"testing"
+	"time"
 
-	"github.com/yijiangchengming/permabox/internal/workload"
+	"github.com/yijiangchengming/permabox/internal/ownership"
 )
 
 // Run with: unshare --mount --propagation private env PERMABOX_KERNEL_TEST=1 go test -v ./internal/mount -run TestKernelPersistence
@@ -28,7 +29,7 @@ func TestKernelPersistence(t *testing.T) {
 	put(t, image, "deleted", "image file")
 	slot := filepath.Join(base, "storage", "default", "app-0")
 	roots := []string{filepath.Dir(filepath.Dir(slot))}
-	owner := workload.Owner{Namespace: "default", Name: "app", Kind: "StatefulSet", UID: "workload-uid"}
+	owner := ownership.Owner{Namespace: "default", Name: "app", Kind: "StatefulSet", UID: "workload-uid"}
 	for _, id := range []string{"first", "replacement"} {
 		func() {
 			bundle := filepath.Join(base, id)
@@ -46,8 +47,18 @@ func TestKernelPersistence(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { _ = syscall.Unmount(root, syscall.MNT_DETACH) })
+			if err := syscall.Mount("", root, "", syscall.MS_SHARED, ""); err != nil {
+				t.Fatal(err)
+			}
 			if _, err := m.PrepareOwned(id, root, slot, "app", owner); err != nil {
 				t.Fatal(err)
+			}
+			mounts, err := m.sys.mounts()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if lower, err := lowerMountID(mounts, m.alias(id)); lower == 0 || err != nil {
+				t.Fatalf("expected one private lower mount, got %d, %v", lower, err)
 			}
 			if err := m.ActivateOwnership(id); err != nil {
 				t.Fatal(err)
@@ -73,14 +84,16 @@ func TestKernelPersistence(t *testing.T) {
 			if err != nil || released != slot {
 				t.Fatalf("cleanup = %q, %v", released, err)
 			}
-			if err := m.SweepReleasedWorkload(roots, released, func(got workload.Owner) (bool, error) {
-				if got != owner {
-					t.Fatalf("workload = %+v; want %+v", got, owner)
+			now := time.Now()
+			candidates, err := m.DiscoverReleased(roots, released, 0, now)
+			if err != nil || len(candidates) != 1 || candidates[0].Owner() != owner {
+				t.Fatalf("discover = %+v, %v", candidates, err)
+			}
+			// The first release is kept so its replacement can reuse the layer.
+			if id == "replacement" {
+				if err := m.RetireReleased(roots, released, now, candidates); err != nil {
+					t.Fatal(err)
 				}
-				// An ordinary Pod deletion preserves edits for its replacement.
-				return id == "replacement", nil
-			}); err != nil {
-				t.Fatal(err)
 			}
 			check(t, root, "edited", "from image")
 			check(t, root, "deleted", "image file")

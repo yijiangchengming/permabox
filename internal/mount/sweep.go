@@ -9,113 +9,131 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/yijiangchengming/permabox/internal/oci"
-	"github.com/yijiangchengming/permabox/internal/workload"
+	"github.com/yijiangchengming/permabox/internal/ownership"
 )
 
 const (
-	staleAge       = 5 * time.Minute
-	retiredPrefix  = ".permabox-retired-"
-	workloadMarker = ".permabox-workload.json"
+	staleAge        = 5 * time.Minute
+	retiredPrefix   = ".permabox-retired-"
+	workloadMarker  = ".permabox-workload.json"
+	scaleDownMarker = ".permabox-scale-down.json"
+	scaleDownGrace  = time.Minute
 )
 
-type releasedSlot struct {
-	Owner workload.Owner
-	At    time.Time
-	File  os.FileInfo
+type ReclaimReason uint8
+
+const (
+	ReclaimNone ReclaimReason = iota
+	ReclaimZero
+	ReclaimDeleted
+)
+
+// ReleasedSlot identifies one release generation eligible for a policy check.
+type ReleasedSlot struct {
+	path  string
+	owner ownership.Owner
+	at    time.Time
+	file  os.FileInfo
 }
 
-type slotFilter func(path string, released releasedSlot) bool
-type reclaimOwner func(workload.Owner) (bool, error)
+func (s ReleasedSlot) Owner() ownership.Owner { return s.owner }
 
-// SweepWorkloads collects candidates under the mount lock, queries their
-// owners without the lock, then checks the same release generation again.
-func (m Manager) SweepWorkloads(roots []string, ttl time.Duration, now time.Time, reclaim reclaimOwner) error {
-	return m.sweepWorkloads(roots, "", ttl, now, reclaim)
-}
+type slotFilter func(ReleasedSlot) bool
 
-func (m Manager) SweepReleasedWorkload(roots []string, slot string, reclaim reclaimOwner) error {
-	if slot == "" {
-		return nil
-	}
-	return m.sweepWorkloads(roots, slot, 0, time.Now(), reclaim)
-}
-
-func (m Manager) sweepWorkloads(roots []string, target string, ttl time.Duration, now time.Time, reclaim reclaimOwner) error {
-	candidates := make(map[string]releasedSlot)
-	result := m.sweep(roots, target, ttl, now, func(path string, s releasedSlot) bool {
-		candidates[path] = s
+// DiscoverReleased collects policy candidates while performing the regular TTL sweep.
+// An empty target selects all storage slots.
+func (m Manager) DiscoverReleased(roots []string, target string, ttl time.Duration, now time.Time) ([]ReleasedSlot, error) {
+	var candidates []ReleasedSlot
+	err := m.sweep(roots, target, ttl, now, time.Time{}, func(s ReleasedSlot) bool {
+		candidates = append(candidates, s)
 		return false
 	})
-	checked := make(map[workload.Owner]bool)
-	approved := make(map[string]releasedSlot)
-	for path, slot := range candidates {
-		ok, exists := checked[slot.Owner]
-		if !exists {
-			var err error
-			ok, err = reclaim(slot.Owner)
-			if err != nil {
-				result = errors.Join(result, err)
-				ok = false
-			}
-			checked[slot.Owner] = ok
-		}
-		if ok {
-			approved[path] = slot
-		}
+	return candidates, err
+}
+
+// RetireReleased rechecks the approved release generations under the mount lock.
+func (m Manager) RetireReleased(roots []string, target string, now time.Time, approved []ReleasedSlot) error {
+	return m.retireApproved(roots, target, now, approved, 0, time.Time{})
+}
+
+// StageScaledDownBefore requires a renewed approval with a short lifetime.
+func (m Manager) StageScaledDownBefore(roots []string, target string, now time.Time, approved []ReleasedSlot, generation int64, deadline time.Time) error {
+	if generation <= 0 || deadline.IsZero() {
+		return errors.New("scale-down approval requires a StatefulSet generation and deadline")
 	}
+	return m.retireApproved(roots, target, now, approved, generation, deadline)
+}
+
+type scaleDown struct {
+	Released   time.Time `json:"released"`
+	Since      time.Time `json:"since"`
+	Generation int64     `json:"generation"`
+}
+
+func scaleDownReady(slot ReleasedSlot, now time.Time, generation int64) (bool, error) {
+	path := filepath.Join(slot.path, scaleDownMarker)
+	var pending scaleDown
+	if readMarker(path, &pending) && pending.Generation == generation && pending.Released.Equal(slot.at) && !pending.Since.IsZero() && !now.Before(pending.Since) {
+		return now.Sub(pending.Since) >= scaleDownGrace, nil
+	}
+	return false, writeRecord(path, scaleDown{Released: slot.at, Since: now, Generation: generation})
+}
+
+func (m Manager) retireApproved(roots []string, target string, now time.Time, approved []ReleasedSlot, generation int64, deadline time.Time) error {
 	if len(approved) == 0 {
-		return result
+		return nil
 	}
-	// Recheck before retirement so a scale-up during discovery cancels GC.
-	clear(checked)
-	for path, slot := range approved {
-		ok, exists := checked[slot.Owner]
-		if !exists {
-			var err error
-			ok, err = reclaim(slot.Owner)
-			if err != nil {
-				result = errors.Join(result, err)
-				ok = false
-			}
-			checked[slot.Owner] = ok
+	byPath := make(map[string]ReleasedSlot, len(approved))
+	for _, s := range approved {
+		byPath[s.path] = s
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	var stageErr error
+	err := m.sweep(roots, target, 0, now, deadline, func(s ReleasedSlot) bool {
+		a, ok := byPath[s.path]
+		if !ok || s.owner != a.owner || !s.at.Equal(a.at) || !os.SameFile(s.file, a.file) {
+			return false
 		}
-		if !ok {
-			delete(approved, path)
+		if generation == 0 {
+			return true
 		}
-	}
-	if len(approved) == 0 {
-		return result
-	}
-	return errors.Join(result, m.sweep(roots, target, 0, now, func(path string, s releasedSlot) bool {
-		a, ok := approved[path]
-		return ok && s.Owner == a.Owner && s.At.Equal(a.At) && os.SameFile(s.File, a.File)
-	}))
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		ready, err := scaleDownReady(s, now.UTC(), generation)
+		stageErr = errors.Join(stageErr, err)
+		return ready && time.Now().Before(deadline)
+	})
+	return errors.Join(err, stageErr)
 }
 
 // Sweep retries released journals and recovers stale records in this mount
 // namespace. A positive idleTTL also enables deletion of released slots under
 // the supplied storage roots. A failed cleanup leaves its journal for retry.
 func (m Manager) Sweep(roots []string, idleTTL time.Duration, now time.Time) error {
-	return m.sweep(roots, "", idleTTL, now, nil)
+	return m.sweep(roots, "", idleTTL, now, time.Time{}, nil)
 }
 
-func (m Manager) sweep(roots []string, target string, idleTTL time.Duration, now time.Time, filter slotFilter) error {
+func (m Manager) sweep(roots []string, target string, idleTTL time.Duration, now, deadline time.Time, filter slotFilter) error {
 	if now.IsZero() {
 		now = time.Now()
 	}
 	now = now.UTC()
-	lock, err := m.lock((idleTTL > 0 || filter != nil) && len(roots) != 0)
+	lock, err := m.lock(len(roots) != 0)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
 	if err != nil {
 		return err
 	}
-	retired, sweepErr := m.sweepLocked(roots, target, idleTTL, now, filter)
+	retired, sweepErr := m.sweepLocked(roots, target, idleTTL, now, deadline, filter)
 	result := errors.Join(sweepErr, lock.Close())
 	for _, slot := range retired {
 		if err := deleteRetired(slot); err != nil {
@@ -125,7 +143,7 @@ func (m Manager) sweep(roots []string, target string, idleTTL time.Duration, now
 	return result
 }
 
-func (m Manager) sweepLocked(roots []string, target string, ttl time.Duration, now time.Time, filter slotFilter) ([]string, error) {
+func (m Manager) sweepLocked(roots []string, target string, ttl time.Duration, now, deadline time.Time, filter slotFilter) ([]string, error) {
 	ns, err := m.sys.namespace()
 	if err != nil {
 		return nil, err
@@ -172,10 +190,12 @@ func (m Manager) sweepLocked(roots []string, target string, ttl time.Duration, n
 				continue
 			}
 			result = errors.Join(result, fmt.Errorf("clean up %s: %w", id, err))
+		} else if state.Started && state.Namespace == ns {
+			result = errors.Join(result, m.commitOwnership(id, state))
 		}
 		live = append(live, state)
 	}
-	if (ttl <= 0 && filter == nil) || unknown || len(roots) == 0 {
+	if unknown || len(roots) == 0 {
 		return nil, result
 	}
 	mounts, err = m.sys.mounts() // Refresh after unmounting.
@@ -197,7 +217,7 @@ func (m Manager) sweepLocked(roots []string, target string, ttl time.Duration, n
 			result = errors.Join(result, fmt.Errorf("invalid storage root %q", root))
 			continue
 		}
-		paths, err := retireSlots(filepath.Clean(root), target, m.Dir, protectedRoots, live, mounts, ttl, now, filter)
+		paths, err := retireSlots(filepath.Clean(root), target, m.Dir, protectedRoots, live, mounts, ttl, now, deadline, filter)
 		retired = append(retired, paths...)
 		result = errors.Join(result, err)
 	}
@@ -218,7 +238,7 @@ func staleRoot(root string, mounts []entry) bool {
 	return true
 }
 
-func retireSlots(root, target, stateDir string, protectedRoots []string, live []record, mounts []entry, ttl time.Duration, now time.Time, filter slotFilter) ([]string, error) {
+func retireSlots(root, target, stateDir string, protectedRoots []string, live []record, mounts []entry, ttl time.Duration, now, deadline time.Time, filter slotFilter) ([]string, error) {
 	if target != "" && filepath.Dir(filepath.Dir(target)) != root {
 		return nil, nil
 	}
@@ -234,6 +254,7 @@ func retireSlots(root, target, stateDir string, protectedRoots []string, live []
 	}
 	var retired []string
 	var result error
+	currentBoot := sync.OnceValues(bootID)
 	for _, namespace := range namespaces {
 		if !namespace.IsDir() || strings.HasPrefix(namespace.Name(), ".") {
 			continue
@@ -249,6 +270,17 @@ func retireSlots(root, target, stateDir string, protectedRoots []string, live []
 		}
 		for _, pod := range pods {
 			parked := strings.HasPrefix(pod.Name(), retiredPrefix)
+			if name, ok := strings.CutSuffix(pod.Name(), receiptSuffix); parked && ok && target == "" && pod.Type().IsRegular() {
+				path := filepath.Join(parent, name)
+				// A crash before the rename, or after deleting the directory,
+				// can leave a receipt with no directory to delete.
+				if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+					if err := removeDurable(path + receiptSuffix); err != nil {
+						result = errors.Join(result, err)
+					}
+				}
+				continue
+			}
 			if !pod.IsDir() || (strings.HasPrefix(pod.Name(), ".") && !parked) {
 				continue
 			}
@@ -258,6 +290,18 @@ func retireSlots(root, target, stateDir string, protectedRoots []string, live []
 			}
 			if overlap(slot, stateDir) || containsStorageRoot(slot, protectedRoots) || journalReferences(live, slot) || mountReferences(mounts, slot) {
 				continue
+			}
+			if parked {
+				var receipt retirementReceipt
+				if readMarker(slot+receiptSuffix, &receipt) {
+					if validRetirement(slot, receipt) {
+						retired = append(retired, slot)
+					}
+					continue
+				}
+				if _, err := os.Lstat(slot + receiptSuffix); !errors.Is(err, os.ErrNotExist) {
+					continue
+				}
 			}
 			owned, err := ownedSlot(slot)
 			if err != nil {
@@ -269,29 +313,44 @@ func retireSlots(root, target, stateDir string, protectedRoots []string, live []
 			}
 			marker := filepath.Join(slot, releasedMarker)
 			var released time.Time
+			if !parked {
+				eligible, err := recoverSlotRelease(slot, now, currentBoot)
+				if err != nil {
+					result = errors.Join(result, err)
+				}
+				if !eligible {
+					continue
+				}
+			}
 			if !readMarker(marker, &released) || released.IsZero() {
 				continue
 			}
 			if parked {
+				if err := recordRetirement(slot, slot); err != nil {
+					result = errors.Join(result, err)
+					continue
+				}
 				retired = append(retired, slot)
 				continue
 			}
 			if ttl <= 0 || now.Sub(released) < ttl {
-				var owner workload.Owner
+				var owner ownership.Owner
 				if filter == nil || !readMarker(filepath.Join(slot, workloadMarker), &owner) || !owner.Valid() || owner.Namespace != namespace.Name() {
 					continue
 				}
 				info, err := os.Lstat(marker)
-				if err != nil || !filter(slot, releasedSlot{owner, released, info}) {
+				if err != nil || !filter(ReleasedSlot{path: slot, owner: owner, at: released, file: info}) {
 					continue
 				}
 			}
-			path, err := retireSlot(slot)
+			path, err := retireSlot(slot, deadline)
 			if err != nil {
 				result = errors.Join(result, fmt.Errorf("retire slot %s: %w", slot, err))
 				continue
 			}
-			retired = append(retired, path)
+			if path != "" {
+				retired = append(retired, path)
+			}
 		}
 	}
 	return retired, result
@@ -336,7 +395,38 @@ func journalReferences(live []record, slot string) bool {
 	return false
 }
 
-func retireSlot(slot string) (string, error) {
+const receiptSuffix = ".receipt"
+
+type retirementReceipt struct {
+	Inode uint64 `json:"inode"`
+}
+
+func retirementIdentity(path string) (retirementReceipt, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return retirementReceipt{}, err
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || !info.IsDir() {
+		return retirementReceipt{}, errUnsafeDir
+	}
+	return retirementReceipt{Inode: stat.Ino}, nil
+}
+
+func validRetirement(slot string, receipt retirementReceipt) bool {
+	got, err := retirementIdentity(slot)
+	return err == nil && receipt == got
+}
+
+func recordRetirement(original, parked string) error {
+	receipt, err := retirementIdentity(original)
+	if err != nil {
+		return err
+	}
+	return writeRecord(parked+receiptSuffix, receipt)
+}
+
+func retireSlot(slot string, deadline time.Time) (string, error) {
 	parent := filepath.Dir(slot)
 	retired, err := os.MkdirTemp(parent, retiredPrefix)
 	if err != nil {
@@ -347,8 +437,17 @@ func retireSlot(slot string) (string, error) {
 	if err := os.Remove(retired); err != nil {
 		return "", err
 	}
-	if err := os.Rename(slot, retired); err != nil {
+	if _, err := os.Lstat(retired + receiptSuffix); !errors.Is(err, os.ErrNotExist) {
+		return "", errors.New("retirement name already has a receipt")
+	}
+	if err := recordRetirement(slot, retired); err != nil {
 		return "", err
+	}
+	if !deadline.IsZero() && !time.Now().Before(deadline) {
+		return "", removeDurable(retired + receiptSuffix)
+	}
+	if err := os.Rename(slot, retired); err != nil {
+		return "", errors.Join(err, removeDurable(retired+receiptSuffix))
 	}
 	return retired, syncDir(parent)
 }
@@ -364,7 +463,25 @@ func deleteRetired(slot string) error {
 	}
 	defer parent.Close()
 	path := filepath.Join(fmt.Sprintf("/proc/self/fd/%d", parent.Fd()), filepath.Base(slot))
+	var receipt retirementReceipt
+	if !readMarker(path+receiptSuffix, &receipt) {
+		return nil
+	}
+	if !validRetirement(path, receipt) {
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			return errors.New("retired directory does not match its receipt")
+		}
+	}
+	if err := parent.Sync(); err != nil {
+		return err
+	}
 	if err := os.RemoveAll(path); err != nil {
+		return err
+	}
+	if err := parent.Sync(); err != nil {
+		return err
+	}
+	if err := remove(path + receiptSuffix); err != nil {
 		return err
 	}
 	return parent.Sync()

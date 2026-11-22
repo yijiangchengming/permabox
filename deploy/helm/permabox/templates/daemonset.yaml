@@ -18,11 +18,7 @@ spec:
       labels:
         {{- include "permabox.selectorLabels" . | nindent 8 }}
     spec:
-      {{- $workloadGC := and (eq .Values.mode "install") (or .Values.gcOnWorkloadDelete .Values.gcOnScaleToZero .Values.gcWorkloadAnnotations) }}
-      automountServiceAccountToken: {{ $workloadGC }}
-      {{- if $workloadGC }}
-      serviceAccountName: {{ include "permabox.workloadGCName" . }}
-      {{- end }}
+      automountServiceAccountToken: false
       hostPID: true
       {{- include "permabox.scheduling" . | nindent 6 }}
       containers:
@@ -36,6 +32,8 @@ spec:
           env:
             - name: MODE
               value: {{ .Values.mode | quote }}
+            - name: ALLOW_LEGACY_WRAPPER_MIGRATION
+              value: {{ default false .Values.allowLegacyWrapperMigration | quote }}
             - name: OWNER
               value: {{ printf "%s/%s" .Release.Namespace .Release.Name | quote }}
             - name: HOST_ROOT
@@ -50,6 +48,8 @@ spec:
               value: {{ .Values.k3s.bin | quote }}
             - name: STORAGE_ROOT
               value: {{ .Values.storageRoot | quote }}
+            - name: TRUSTED_NAMESPACES
+              value: {{ default (list) .Values.trustedNamespaces | toJson | quote }}
             - name: UNDERLYING_RUNTIME
               value: {{ .Values.underlyingRuntime | quote }}
             - name: STORAGE_ROOTS
@@ -69,9 +69,10 @@ spec:
             - name: PERSIST_ANNOTATION
               value: {{ .Values.persistAnnotation | quote }}
           readinessProbe:
+            timeoutSeconds: 5
             exec:
-              {{- if $workloadGC }}
-              command: ["/bin/sh", "-c", "test -f /tmp/permabox-ready && /usr/local/lib/permabox/permabox check-workload-bridge /host/opt/permabox-k3s/workload.sock"]
+              {{- if eq .Values.mode "install" }}
+              command: ["/bin/sh", "-c", "test -f /tmp/permabox-ready && /usr/local/bin/permabox-k3s bridge-health --node"]
               {{- else }}
               command: ["test", "-f", "/tmp/permabox-ready"]
               {{- end }}

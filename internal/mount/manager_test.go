@@ -131,7 +131,7 @@ type fakeSystem struct {
 func (*fakeSystem) namespace() (string, error) { return "mnt:[1]", nil }
 func (f *fakeSystem) mounts() ([]entry, error) { return append([]entry(nil), f.table...), nil }
 func (f *fakeSystem) mount(source, target, kind string, flags uintptr, opts string) error {
-	if flags&syscall.MS_REMOUNT != 0 {
+	if flags&(syscall.MS_REMOUNT|syscall.MS_PRIVATE) != 0 {
 		return nil
 	}
 	if f.fail && kind == "overlay" {
