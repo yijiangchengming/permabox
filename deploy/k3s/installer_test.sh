@@ -58,7 +58,7 @@ printf '%s\n' '#!/bin/sh' \
   '    jq -n --arg runtime "${FIXTURE_RUNTIME:-/data/data/current/bin/runc}" '\''{Runtime:$runtime,Bundle:"/bundle"}'\'' >"$HOST_ROOT/run/permabox/in-flight.runtime"; exit $? ;;' \
   '  delete) touch "${READY_FILE}.delete"; exit 0 ;;' \
   'esac' \
-  '[ "$#" -eq 1 ] && [ "$1" = validate-config ] || exit 1' \
+  '[ "$#" -eq 1 ] && [ "$1" = validate-config ] && [ "$(stat -c %a "$PERMABOX_CONFIG")" = 600 ] || exit 1' \
   'case "$PERMABOX_CONFIG" in "$HOST_ROOT"/opt/permabox-k3s/.stage.*/config.yaml) ;; *) exit 1 ;; esac' \
   '[ -s "$PERMABOX_CONFIG" ] && [ "${reject_config:-0}" = 0 ]' >"$PAYLOAD"
 chmod 0755 "$PAYLOAD"

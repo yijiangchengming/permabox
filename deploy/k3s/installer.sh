@@ -294,6 +294,7 @@ write_runtime() {
         + (if $trusted == [] then {} else {trusted_namespaces: $trusted} end)
       end
     ' >"$tmpdir/config.yaml" || return 1
+  chmod 0600 "$tmpdir/config.yaml" || return 1
   PERMABOX_CONFIG="$tmpdir/config.yaml" "$payload" validate-config || {
     fail 'PermaBox payload rejected the staged runtime configuration'; return 1
   }
