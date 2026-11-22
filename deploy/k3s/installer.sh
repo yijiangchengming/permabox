@@ -213,7 +213,8 @@ publish_runtime() {
   generation=versions/${digest%% *}
   "$payload" prepare-runtime-cache "$install_host/versions" "${digest%% *}" || return 1
   if [[ ! -d $install_host/$generation ]]; then
-    mkdir "$stage/version" && mv "$stage/permabox" "$stage/config.yaml" "$stage/version/" &&
+    mkdir "$stage/version" && chmod 0700 "$stage/version" &&
+      mv "$stage/permabox" "$stage/config.yaml" "$stage/version/" &&
       mv -T "$stage/version" "$install_host/$generation" || return 1
   fi
   ln -s "$generation" "$stage/current" && mv -fT "$stage/current" "$install_host/current" &&

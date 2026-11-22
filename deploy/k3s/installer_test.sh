@@ -189,8 +189,11 @@ rm "$state_dir/permabox" "$state_dir/lock"
   rm "$version"
   mv "$tmp/cached-version" "$version"
   cp "$stage/config.yaml" "$version/config.yaml"
+  umask 000
   publish_runtime "$stage"
+  umask 077
   test "$(readlink "$install_host/current")" = "versions/${digest%% *}"
+  test "$(stat -c %a "$version")" = 700
 )
 ln -s "$tmp/original" "$state_dir/lock"
 if reconcile 2>"$tmp/unsafe-lock-error"; then
