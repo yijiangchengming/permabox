@@ -50,15 +50,31 @@ func prepareInstallerState(path string) error {
 	defer dir.Close()
 	uid := uint32(os.Geteuid())
 	for _, name := range []string{"lock", "create.lock"} {
-		lock, err := os.Lstat(filepath.Join(trustedpath.FDPath(dir), name))
-		if errors.Is(err, os.ErrNotExist) {
+		fd, err := syscall.Openat(int(dir.Fd()), name, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
+		if errors.Is(err, syscall.ENOENT) {
 			continue
 		}
 		if err != nil {
+			return fmt.Errorf("unsafe installer lock %s: %w", name, err)
+		}
+		lock := os.NewFile(uintptr(fd), name)
+		info, err := lock.Stat()
+		if err != nil {
+			lock.Close()
 			return err
 		}
-		if !lock.Mode().IsRegular() || lock.Mode().Perm()&0022 != 0 || lock.Sys().(*syscall.Stat_t).Uid != uid {
-			return fmt.Errorf("unsafe installer lock %s (mode %s, uid %d)", name, lock.Mode(), lock.Sys().(*syscall.Stat_t).Uid)
+		if !info.Mode().IsRegular() || uint32(info.Sys().(*syscall.Stat_t).Uid) != uid {
+			lock.Close()
+			return fmt.Errorf("unsafe installer lock %s (mode %s, uid %d)", name, info.Mode(), info.Sys().(*syscall.Stat_t).Uid)
+		}
+		if info.Mode().Perm()&0077 != 0 {
+			if err := lock.Chmod(0600); err != nil {
+				lock.Close()
+				return err
+			}
+		}
+		if err := lock.Close(); err != nil {
+			return err
 		}
 	}
 	transaction, err := trustedpath.OpenChild(dir, ".transaction", false, true)

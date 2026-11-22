@@ -127,7 +127,9 @@ restart_service() {
 export MODE=install
 state_dir="$HOST_ROOT/opt/permabox-k3s"
 mkdir -p "$state_dir"
+umask 000
 printf '%s\n' 'keep existing lock' >"$state_dir/lock"
+umask 077
 chmod 0777 "$state_dir"
 if BRIDGE_TIMEOUT=1 reconcile 2>"$tmp/unsafe-state-error"; then
   printf '%s\n' 'accepted a writable installer state directory' >&2; exit 1
@@ -136,6 +138,8 @@ test "$(<"$state_dir/lock")" = 'keep existing lock'
 grep -Fq 'unsafe directory' "$tmp/unsafe-state-error"
 test ! -e "$tmp/cri-queries"
 chmod 0700 "$state_dir"
+"$PERMABOX_STATE_HELPER" prepare-installer-state "$state_dir"
+test "$(stat -c %a "$state_dir/lock")" = 600
 rm "$state_dir/lock"
 
 chmod 0777 "$HOST_ROOT/usr/local/bin/k3s"
