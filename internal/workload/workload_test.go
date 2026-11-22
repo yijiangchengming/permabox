@@ -9,6 +9,8 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
+
+	"github.com/yijiangchengming/permabox/internal/ownership"
 )
 
 func TestPodAnnotationsOverrideWorkloadDefaults(t *testing.T) {
@@ -16,6 +18,8 @@ func TestPodAnnotationsOverrideWorkloadDefaults(t *testing.T) {
 		switch r.URL.Path {
 		case "/api/v1/namespaces/test/pods/pod":
 			fmt.Fprint(w, `{"metadata":{"uid":"pod-id","annotations":{"permabox.io/gc-on-workload-delete":"true","permabox.io/gc-on-scale-to-zero":"false","other":"private"},"ownerReferences":[{"apiVersion":"apps/v1","kind":"StatefulSet","name":"app","uid":"app-id","controller":true}]}}`)
+		case "/apis/apps/v1/namespaces/test/statefulsets/app":
+			fmt.Fprint(w, `{"metadata":{"uid":"app-id"}}`)
 		default:
 			t.Errorf("unexpected upstream path %s", r.URL.Path)
 		}
@@ -33,25 +37,25 @@ func TestPodAnnotationsOverrideWorkloadDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var saved Owner
+	var saved ownership.Owner
 	if err := json.Unmarshal(data, &saved); err != nil {
 		t.Fatal(err)
 	}
-	if del, zero := saved.Overrides.Apply(false, true); !del || zero {
+	if del, zero := ApplyOverrides(saved.Overrides, false, true); !del || zero {
 		t.Fatalf("round-tripped overrides: delete=%v, zero=%v", del, zero)
 	}
 	obj, err := client.get(context.Background(), "Pod", "test", "pod")
 	if err != nil || len(obj.Metadata.Annotations) != 2 {
 		t.Fatalf("bridge exposed unexpected metadata: %+v, %v", obj.Metadata.Annotations, err)
 	}
-	if del, zero := readOverrides(map[string]string{scaleToZeroAnnotation: ""}).Apply(true, true); !del || zero {
+	if del, zero := ApplyOverrides(readOverrides(map[string]string{scaleToZeroAnnotation: ""}), true, true); !del || zero {
 		t.Fatalf("omitted / invalid overrides: delete=%v, zero=%v", del, zero)
 	}
 }
 
 func TestUnixBridgePreservesAuthoritativeNotFound(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if want := "/apis/apps/v1/namespaces/test/deployments/app"; r.URL.Path != want {
+		if want := "/apis/apps/v1/namespaces/test/statefulsets/app"; r.URL.Path != want {
 			t.Errorf("upstream path = %q; want %q", r.URL.Path, want)
 		}
 		w.WriteHeader(http.StatusNotFound)
@@ -68,26 +72,32 @@ func TestUnixBridgePreservesAuthoritativeNotFound(t *testing.T) {
 	defer server.Close()
 	go server.Serve(listener)
 	client := UnixClient(path)
-	if ok, err := client.Reclaim(context.Background(), Owner{Namespace: "test", Kind: "Deployment", Name: "app", UID: "old-uid"}, true, false); err != nil || !ok {
-		t.Fatalf("bridge reclaim = %v, %v", ok, err)
+	if reason, generation, err := client.Reclaim(context.Background(), ownership.Owner{Namespace: "test", Kind: "StatefulSet", Name: "app", UID: "old-uid"}, true, false); err != nil || reason != ReclaimDeleted || generation != 0 {
+		t.Fatalf("bridge reclaim = %v, %d, %v", reason, generation, err)
 	}
-	resp, err := client.request(context.Background(), "/api/v1/namespaces/test/secrets/app")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("unsupported resource returned %d", resp.StatusCode)
+	for _, path := range []string{
+		"/api/v1/namespaces/test/secrets/app",
+		"/apis/apps/v1/namespaces/test/deployments/app",
+		"/apis/apps/v1/namespaces/test/replicasets/app",
+	} {
+		resp, err := client.request(context.Background(), path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("unsupported path %s returned %d", path, resp.StatusCode)
+		}
 	}
 }
 
-func TestResolveControllerChain(t *testing.T) {
-	for _, tc := range []struct{ name, uid, rsUID, kind string }{
-		{"deployment", "pod-id", "rs-id", "Deployment"},
-		{"statefulset", "pod-id", "", "StatefulSet"},
-		{"replacement-pod", "old-pod", "rs-id", ""},
-		{"replacement-replicaset", "pod-id", "old-rs", ""},
-		{"standalone", "pod-id", "", ""},
+func TestResolveStatefulSetOwner(t *testing.T) {
+	for _, tc := range []struct{ name, uid, rsUID, liveSetUID, kind string }{
+		{"replicaset ignored", "pod-id", "rs-id", "", ""},
+		{"statefulset", "pod-id", "", "app-id", "StatefulSet"},
+		{"replaced statefulset", "pod-id", "", "new-app-id", ""},
+		{"replacement-pod", "old-pod", "rs-id", "", ""},
+		{"standalone", "pod-id", "", "", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -96,12 +106,12 @@ func TestResolveControllerChain(t *testing.T) {
 					ref := `[]`
 					if tc.rsUID != "" {
 						ref = fmt.Sprintf(`[{"apiVersion":"apps/v1","kind":"ReplicaSet","name":"rs","uid":%q,"controller":true}]`, tc.rsUID)
-					} else if tc.name == "statefulset" {
+					} else if tc.liveSetUID != "" {
 						ref = `[{"apiVersion":"apps/v1","kind":"StatefulSet","name":"app","uid":"app-id","controller":true}]`
 					}
 					fmt.Fprintf(w, `{"metadata":{"uid":"pod-id","ownerReferences":%s}}`, ref)
-				case "/apis/apps/v1/namespaces/test/replicasets/rs":
-					fmt.Fprint(w, `{"metadata":{"uid":"rs-id","ownerReferences":[{"apiVersion":"apps/v1","kind":"Deployment","name":"app","uid":"app-id","controller":true}]}}`)
+				case "/apis/apps/v1/namespaces/test/statefulsets/app":
+					fmt.Fprintf(w, `{"metadata":{"uid":%q}}`, tc.liveSetUID)
 				default:
 					t.Errorf("unexpected request %s", r.URL.Path)
 				}
@@ -109,7 +119,8 @@ func TestResolveControllerChain(t *testing.T) {
 			defer server.Close()
 			c := Client{base: server.URL, http: server.Client()}
 			got, err := c.Resolve(context.Background(), "test", "pod", tc.uid)
-			if err != nil || got.Kind != tc.kind || (tc.kind != "" && got != (Owner{Namespace: "test", Kind: tc.kind, Name: "app", UID: "app-id"})) {
+			wantError := tc.name == "replaced statefulset"
+			if (err != nil) != wantError || got.Kind != tc.kind || (tc.kind != "" && got != (ownership.Owner{Namespace: "test", Kind: tc.kind, Name: "app", UID: "app-id"})) {
 				t.Fatalf("owner = %+v, %v", got, err)
 			}
 		})
@@ -125,7 +136,8 @@ func TestPolicyRequiresVerifiedWorkloadState(t *testing.T) {
 		{"deleted", `{"reason":"NotFound","details":{"name":"app"}}`, 404, true, true, false},
 		{"replacement", `{"metadata":{"uid":"other"},"spec":{"replicas":0}}`, 200, true, true, false},
 		{"deletion accepted with finalizer", `{"metadata":{"uid":"app-id","deletionTimestamp":"2026-11-19T12:00:00Z"},"spec":{"replicas":0}}`, 200, true, true, false},
-		{"zero", `{"metadata":{"uid":"app-id"},"spec":{"replicas":0}}`, 200, true, false, true},
+		{"zero", `{"metadata":{"uid":"app-id","generation":23},"spec":{"replicas":0}}`, 200, true, false, true},
+		{"zero without generation", `{"metadata":{"uid":"app-id"},"spec":{"replicas":0}}`, 200, false, false, false},
 		{"pod deleted or rolling update", `{"metadata":{"uid":"app-id"},"spec":{"replicas":1}}`, 200, false, false, false},
 		{"missing replicas", `{"metadata":{"uid":"app-id"}}`, 200, false, false, false},
 		{"missing UID", `{"spec":{"replicas":0}}`, 200, false, false, false},
@@ -139,13 +151,44 @@ func TestPolicyRequiresVerifiedWorkloadState(t *testing.T) {
 			}))
 			defer s.Close()
 			c := Client{base: s.URL, http: s.Client()}
-			owner := Owner{Namespace: "test", Kind: "StatefulSet", Name: "app", UID: "app-id"}
+			owner := ownership.Owner{Namespace: "test", Kind: "StatefulSet", Name: "app", UID: "app-id"}
 			for _, p := range []struct{ del, scale, want bool }{{true, true, tc.want}, {true, false, tc.deleteOnly}, {false, true, tc.scaleOnly}, {false, false, false}} {
-				got, _ := c.Reclaim(context.Background(), owner, p.del, p.scale)
-				if got != p.want {
-					t.Fatalf("delete=%v scale=%v: reclaim=%v; want %v", p.del, p.scale, got, p.want)
+				got, generation, err := c.Reclaim(context.Background(), owner, p.del, p.scale)
+				want, wantGeneration := ReclaimNone, int64(0)
+				if p.want {
+					want = ReclaimDeleted
+					if tc.name == "zero" {
+						want, wantGeneration = ReclaimZero, 23
+					}
+				}
+				if tc.name == "zero without generation" && p.scale && err == nil {
+					t.Fatal("expected missing generation to fail closed")
+				}
+				if got != want || generation != wantGeneration {
+					t.Fatalf("delete=%v scale=%v: reclaim=%v generation=%d; want %v, %d", p.del, p.scale, got, generation, want, wantGeneration)
 				}
 			}
 		})
+	}
+}
+
+func TestBridgeReclaimUsesSingleObservationWithGeneration(t *testing.T) {
+	requests := 0
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		fmt.Fprint(w, `{"metadata":{"uid":"app-id","generation":42},"spec":{"replicas":0}}`)
+	}))
+	defer upstream.Close()
+	bridge := Client{base: upstream.URL, http: upstream.Client()}
+	server := httptest.NewServer(http.HandlerFunc(bridge.serveMetadata))
+	defer server.Close()
+	client := Client{base: server.URL, http: server.Client()}
+	owner := ownership.Owner{Namespace: "test", Kind: "StatefulSet", Name: "app", UID: "app-id"}
+	reason, generation, err := client.Reclaim(context.Background(), owner, true, true)
+	if err != nil || reason != ReclaimZero || generation != 42 {
+		t.Fatalf("reclaim = %v, %d, %v; want zero, 42, nil", reason, generation, err)
+	}
+	if requests != 1 {
+		t.Fatalf("requests = %d; want 1", requests)
 	}
 }

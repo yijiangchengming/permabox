@@ -1,4 +1,6 @@
 mode: install
+# One-time opt-in after stopping all PermaBox work on legacy nodes.
+allowLegacyWrapperMigration: false
 
 image:
   # Set to the installer image repository (without a tag).
@@ -7,6 +9,9 @@ image:
   tag: ""
   pullPolicy: IfNotPresent
 
+# Set a tag to keep the bridge on a known-good image across installer upgrades.
+bridgeImage: {}
+
 k3s:
   dataDir: /var/lib/rancher/k3s
   criEndpoint: unix:///run/k3s/containerd/containerd.sock
@@ -14,6 +19,8 @@ k3s:
   bin: /usr/local/bin/k3s
 
 storageRoot: /var/lib/permabox/storage
+# Exact Kubernetes namespace names allowed to use persistence. Empty denies persistence.
+trustedNamespaces: []
 # Empty selects runc from the K3s data/current/bin directory.
 underlyingRuntime: ""
 # Aliases for the fixed Pod annotations; values are absolute host paths.

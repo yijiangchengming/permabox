@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -24,6 +25,7 @@ type Config struct {
 	Runtime               string            `yaml:"underlying_runtime"`
 	LogFile               string            `yaml:"log_file"`
 	Annotation            string            `yaml:"persist_annotation"`
+	TrustedNamespaces     []string          `yaml:"trusted_namespaces"`
 	StorageRoots          map[string]string `yaml:"storage_roots"`
 	UnderlyingRuntimes    map[string]string `yaml:"underlying_runtimes"`
 	GCIdleTTL             time.Duration     `yaml:"gc_idle_ttl"`
@@ -34,6 +36,7 @@ type Config struct {
 }
 
 var aliasPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,62}$`)
+var namespacePattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
 func Load() (Config, error) {
 	cfg := Config{StorageRoot: "/var/lib/permabox/storage", Runtime: "/usr/bin/runc", LogFile: DefaultLog, Annotation: "permabox.io/persist"}
@@ -83,10 +86,19 @@ func Load() (Config, error) {
 			return cfg, fmt.Errorf("invalid absolute config path %q", path)
 		}
 	}
+	for _, namespace := range cfg.TrustedNamespaces {
+		if !namespacePattern.MatchString(namespace) {
+			return cfg, fmt.Errorf("trusted_namespaces: invalid DNS label %q", namespace)
+		}
+	}
 	if strings.TrimSpace(cfg.Annotation) == "" {
 		return cfg, errors.New("persist_annotation must not be empty")
 	}
 	return cfg, nil
+}
+
+func (c Config) TrustsNamespace(namespace string) bool {
+	return slices.Contains(c.TrustedNamespaces, namespace)
 }
 
 func (c Config) WorkloadGC() bool {

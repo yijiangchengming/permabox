@@ -68,8 +68,9 @@ func readMounts(r io.Reader) ([]entry, error) {
 			Target: unescape.Replace(left[4]), Kind: right[0], Source: unescape.Replace(right[1]),
 			Options: unescape.Replace(right[2]), RawOptions: right[2],
 		}
-		if !filepath.IsAbs(mount.Target) || !filepath.IsAbs(mount.FSRoot) {
-			return nil, fmt.Errorf("malformed mountinfo paths")
+		// nsfs uses a namespace identifier such as net:[4026532292] as its root.
+		if !filepath.IsAbs(mount.Target) || (!filepath.IsAbs(mount.FSRoot) && mount.Kind != "nsfs") {
+			return nil, fmt.Errorf("malformed mountinfo paths: type %q, root %q, target %q", mount.Kind, mount.FSRoot, mount.Target)
 		}
 		mounts = append(mounts, mount)
 	}

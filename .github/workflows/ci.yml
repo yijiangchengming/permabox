@@ -2,17 +2,69 @@ name: CI
 
 on:
   pull_request:
+    types: [opened, reopened, synchronize, edited]
   push:
-    branches: [main]
+    branches: [dev, main]
   workflow_call:
 
 permissions:
   contents: read
 
 jobs:
+  upstream-kubernetes:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0
+            kubernetes: "1.35.8"
+            config: 2
+            runtime: runc
+          - image: kindest/node:v1.36.4@sha256:099e049362a1526b2db71494e1947aae99bd16290d7c895f2b7ea312e3cbfaed
+            kubernetes: "1.36.4"
+            config: 3
+            runtime: runc
+          - image: kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
+            kubernetes: "1.37.0"
+            config: 2
+            runtime: runc
+          - image: kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
+            kubernetes: "1.37.0"
+            config: 2
+            runtime: crun
+    name: Kubernetes ${{ matrix.kubernetes }} / config v${{ matrix.config }} / ${{ matrix.runtime }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+      - name: Build PermaBox
+        run: make build
+      - name: Install pinned kind
+        run: |
+          curl --fail --silent --show-error --location --retry 3 \
+            https://github.com/kubernetes-sigs/kind/releases/download/v0.33.0/kind-linux-amd64 \
+            --output "$RUNNER_TEMP/kind"
+          echo 'aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d  kind' | (cd "$RUNNER_TEMP" && sha256sum -c -)
+          chmod 0755 "$RUNNER_TEMP/kind"
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+      - name: Verify StatefulSet persistence and reclamation
+        env:
+          KIND_IMAGE: ${{ matrix.image }}
+          CONTAINERD_CONFIG: ${{ matrix.config }}
+          OCI_RUNTIME: ${{ matrix.runtime }}
+        run: bash deploy/kubernetes/smoke_test.sh "$KIND_IMAGE" "$CONTAINERD_CONFIG" "$OCI_RUNTIME"
+
   verify:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -34,3 +86,33 @@ jobs:
           docker build -f deploy/k3s/Dockerfile -t permabox-installer:ci .
           docker run --rm --entrypoint /usr/local/lib/permabox/permabox \
             permabox-installer:ci validate-config
+      - name: Start a single-node K3s cluster
+        env:
+          INSTALL_K3S_VERSION: v1.34.5+k3s1
+        run: |
+          curl --fail --silent --show-error --location --retry 3 \
+            "https://raw.githubusercontent.com/k3s-io/k3s/${INSTALL_K3S_VERSION}/install.sh" \
+            --output "$RUNNER_TEMP/install-k3s.sh"
+          sudo env INSTALL_K3S_VERSION="$INSTALL_K3S_VERSION" sh "$RUNNER_TEMP/install-k3s.sh" \
+            server --disable=traefik --disable=servicelb --disable=local-storage --disable=metrics-server
+          kubeconfig="$RUNNER_TEMP/k3s.yaml"
+          sudo install -m 0600 -o "$(id -u)" /etc/rancher/k3s/k3s.yaml "$kubeconfig"
+          echo "KUBECONFIG=$kubeconfig" >> "$GITHUB_ENV"
+          export KUBECONFIG="$kubeconfig"
+          # shellcheck disable=SC2016
+          timeout 120s bash -c 'until [[ -n $(k3s kubectl --request-timeout=5s get nodes -o name) ]]; do sleep 2; done'
+          k3s kubectl wait --for=condition=Ready node --all --timeout=180s
+          docker save permabox-installer:ci | sudo k3s ctr -n k8s.io images import -
+      - name: Verify Helm deployment on K3s
+        run: bash deploy/k3s/smoke_test.sh
+      - name: Collect K3s diagnostics on failure
+        if: failure()
+        run: |
+          sudo journalctl -u k3s --no-pager -n 250 || true
+          sudo tail -n 100 /var/log/permabox.log || true
+          if [[ -n ${KUBECONFIG:-} ]]; then
+            k3s kubectl --request-timeout=10s get pods -A -o wide || true
+            k3s kubectl --request-timeout=10s -n permabox-system logs daemonset/permabox-installer --tail=150 || true
+            k3s kubectl --request-timeout=10s -n permabox-system logs daemonset/permabox-installer --previous --tail=150 || true
+            k3s kubectl --request-timeout=10s get events -A --sort-by=.lastTimestamp || true
+          fi

@@ -3,9 +3,41 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestLoadTrustedNamespaces(t *testing.T) {
+	for _, tc := range []struct {
+		yaml  string
+		valid bool
+	}{
+		{"", true},
+		{"trusted_namespaces: []", true},
+		{"trusted_namespaces: [team-1, " + strings.Repeat("a", 63) + "]", true},
+		{"trusted_namespaces: ['*']", false},
+		{"trusted_namespaces: [team.one]", false},
+		{"trusted_namespaces: [Team]", false},
+		{"trusted_namespaces: ['team ']", false},
+		{"trusted_namespaces: ['']", false},
+		{"trusted_namespaces: [-team]", false},
+		{"trusted_namespaces: [team-]", false},
+		{"trusted_namespaces: [" + strings.Repeat("a", 64) + "]", false},
+		{"trusted_namespaces: team", false},
+	} {
+		t.Run(tc.yaml, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			t.Setenv("PERMABOX_CONFIG", path)
+			if err := os.WriteFile(path, []byte(tc.yaml), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Load(); (err == nil) != tc.valid {
+				t.Fatalf("Load() error = %v; want valid=%t", err, tc.valid)
+			}
+		})
+	}
+}
 
 func TestLoadOverridesAndDefaults(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")

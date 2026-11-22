@@ -1,0 +1,35 @@
+name: Compatibility / RKE2
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rke2:
+    name: RKE2 1.37.2 / containerd v3 / runc
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+      - name: Build PermaBox
+        run: make build
+      - name: Download and verify upstream RKE2
+        working-directory: ${{ runner.temp }}
+        run: |
+          curl --fail --silent --show-error --location --retry 3 --max-time 180 \
+            'https://github.com/rancher/rke2/releases/download/v1.37.2%2Brke2r1/rke2.linux-amd64.tar.gz' \
+            --output rke2.tar.gz
+          echo '0568f48d772c7feff7056062225d5ba82fb3f73ea7acaea63862fe601dae6d92  rke2.tar.gz' | sha256sum -c -
+          tar -xzf rke2.tar.gz bin/rke2
+      - name: Verify StatefulSet persistence and reclamation
+        run: bash deploy/rke2/smoke_test.sh "$RUNNER_TEMP/bin/rke2"

@@ -17,17 +17,20 @@ sudo install -o root -g root -m 0755 ./permabox /usr/local/bin/permabox
 sudo install -d -o root -g root -m 0755 /etc/permabox
 sudo install -o root -g root -m 0644 deploy/config.yaml /etc/permabox/config.yaml
 sudo install -d -o root -g root -m 0700 /var/lib/permabox/storage
+sudo install -d -o root -g root -m 0700 /opt/permabox
 sudo test -x /usr/bin/runc
 ```
 
 See [config.yaml](config.yaml) for the defaults. If the node's `runc` is elsewhere, set `underlying_runtime` to its absolute path. It must not point back to PermaBox. Test any other underlying runtime on the target node before using it. PermaBox tracks mounts and cleanup in `/run/permabox` and keeps persistent data separately in `<storage_root>/<namespace>/<pod-name>/upper`. The host log defaults to `/var/log/permabox.log`.
+
+Set `trusted_namespaces: [permabox-demo]` in the installed config to run the example. The default empty list denies persistence; regular runtime passthrough still works. Only list namespaces whose Pod creators you trust with every writable layer in that namespace. StatefulSet UID verification does not isolate users who can create Pods in the same namespace. Set the allowlist explicitly when upgrading.
 
 | Environment variable | Purpose |
 | --- | --- |
 | `PERMABOX_CONFIG` | Config file path; defaults to `/etc/permabox/config.yaml` |
 | `PERMABOX_STORAGE_ROOT` | Overrides `storage_root` |
 | `PERMABOX_UNDERLYING_RUNTIME` | Overrides `underlying_runtime` |
-| `PERMABOX_LOG_FILE` | Overrides `log_file` |
+| `PERMABOX_LOG_FILE` | Overrides `log_file`. Use a regular file under directories writable only by trusted host administrators. Log paths ending in a symbolic link are rejected. |
 | `PERMABOX_PERSIST_ANNOTATION` | Overrides `persist_annotation` |
 | `PERMABOX_GC_IDLE_TTL` | Overrides `gc_idle_ttl` |
 
@@ -42,7 +45,9 @@ underlying_runtimes:
   gpu: /usr/bin/nvidia-container-runtime
 ```
 
-On the Pod, or under `spec.template.metadata.annotations` in a StatefulSet, set `permabox.io/storage-root: fast` to use that storage root for the container selected for persistence. Set `permabox.io/underlying-runtime: gpu` to choose a runtime for the Pod's workload containers, even when persistence is disabled. The sandbox always uses the default runtime. When the annotations are absent, PermaBox uses `storage_root` and `underlying_runtime`. Changing the storage alias does not migrate existing data. On each target node, ensure the storage is local and the configured runtime binaries are installed and executable.
+On the Pod, or under `spec.template.metadata.annotations` in a StatefulSet, set `permabox.io/storage-root: fast` to use that storage root for the container selected for persistence. Set `permabox.io/underlying-runtime: gpu` to choose a runtime for the Pod's workload containers, even when persistence is disabled. Runtime aliases require the Pod namespace to be listed in `trusted_namespaces`. In shared clusters, use admission policy to restrict RuntimeClass and alias access to approved workloads. The sandbox always uses the default runtime. When the annotations are absent, PermaBox uses `storage_root` and `underlying_runtime`. Changing the storage alias does not migrate existing data. On each target node, ensure the storage is local and the configured runtime binaries are installed and executable.
+
+For production, put each configured storage root on a bounded filesystem separate from the node OS and runtime data. PermaBox writes outside the runtime's snapshot storage. Use host-managed block and inode quotas where supported, monitor both limits, and verify enforcement on the target filesystem. A dedicated filesystem limits node-wide impact, while per-slot quotas also limit contention between workloads sharing it.
 
 ## 2. Register the containerd handler
 
@@ -79,6 +84,8 @@ From a terminal with `kubectl` access and the project checkout, set `NODE` to th
   kubectl get nodes -l "$LABEL=true" -o wide
   test "$(kubectl get nodes -l "$LABEL=true" -o name)" = "node/$NODE"
 
+  kubectl apply -f deploy/kubernetes/workload-bridge.yaml
+  kubectl -n permabox-system rollout status daemonset/permabox-workload-bridge --timeout=180s
   kubectl create namespace permabox-demo
   kubectl apply -f deploy/runtimeclass.yaml
   kubectl -n permabox-demo apply -f deploy/statefulset.yaml
@@ -87,7 +94,7 @@ From a terminal with `kubectl` access and the project checkout, set `NODE` to th
 )
 ```
 
-If you have deployed the example before, check whether a persistent directory already exists on the host for that namespace and Pod name. Recreating a namespace with the same name does not give the Pod a fresh writable layer.
+PermaBox reuses a layer only for the same StatefulSet UID. A same-name replacement is blocked while its predecessor's layer exists. On upgrade, PermaBox adopts a layer with a matching previous owner marker. For older layers without verified ownership, stop the workload, confirm the layer is unmounted, and back up and archive its slot. Start a clean layer and restore application data through the application. A metadata outage temporarily blocks new persistent container creation and leaves existing layers intact.
 
 ## 4. Verify that file changes survive Pod recreation
 
@@ -109,11 +116,11 @@ Start with a clean example data directory and keep the image unchanged throughou
   test -n "$old_image"
 
   k exec "$pod" -c demo -- /bin/sh -ec '
-    test ! -e /permabox-created
+    test ! -e /etc/permabox-created
     test -f /etc/profile
     test "$(cat /etc/profile)" != "# modified-by-permabox"
     test -f /etc/inittab
-    printf "%s\n" created-by-permabox > /permabox-created
+    printf "%s\n" created-by-permabox > /etc/permabox-created
     printf "%s\n" "# modified-by-permabox" > /etc/profile
     rm /etc/inittab
   '
@@ -132,7 +139,7 @@ Start with a clean example data directory and keep the image unchanged throughou
   test "$(pod_field '{.status.containerStatuses[0].imageID}')" = "$old_image"
 
   k exec "$pod" -c demo -- /bin/sh -ec '
-    test "$(cat /permabox-created)" = created-by-permabox
+    test "$(cat /etc/permabox-created)" = created-by-permabox
     test "$(cat /etc/profile)" = "# modified-by-permabox"
     test ! -e /etc/inittab
   '
@@ -148,9 +155,13 @@ If verification fails, first run `kubectl -n permabox-demo describe pod permabox
 
 The default `gc_idle_ttl: "0s"` retains released data. Periodic GC still retries stale cleanup when it can confirm that doing so is safe. With a positive Go duration such as `"72h"`, the idle period starts when the writable layer was last confirmed released. After the period elapses, a subsequent eligible GC sweep can delete the data. Before expiry, a replacement on the same node with the same storage root, namespace, and Pod name can restore the layer. GC keeps legacy data without a lifecycle marker until a later successful use and release. It skips active, potentially mounted, or uncertain data and records. Shared storage is unsupported.
 
-Reclaiming data when a workload is deleted or scaled to zero is off by default. The [K3s Helm installer](k3s/README.md) is the recommended way to enable either policy. For manual deployment, enabling `gc_on_workload_delete` or `gc_on_scale_to_zero` requires running `permabox serve-workloads <socket-path>` in a Kubernetes Pod. Grant its ServiceAccount `get` access to Pods, ReplicaSets, Deployments, and StatefulSets. Place the socket in a private directory on the node with mode `0700`; the bridge container needs access to the API service and standard ServiceAccount credentials. Set `workload_socket` in the node config to the absolute host path to that same socket. Leave both policies off without the bridge.
+Reclaiming data when a StatefulSet is deleted or scaled to zero is off by default. Deletion can reclaim a released layer on the next eligible sweep. Scale-to-zero requires a later sweep, at least one minute after the first approval. GC confirms each workload shortly before renaming its layers; an expired approval or a reused layer prevents that retirement. An upscale accepted between the final API check and the disk operation can still lose the released layer. To preserve data across scale-to-zero, leave `gc_on_scale_to_zero` disabled and avoid enabling it through workload annotations. Idle TTL is a separate policy. For manual deployment, the local metadata bridge is required even with both workload policies off. Set `workload_socket` to its absolute host path. Its ServiceAccount needs only `get` access to Pods and StatefulSets, and its socket directory must be private (`0700`). The [K3s Helm installer](k3s/README.md) sets it up automatically.
+
+After a node reboot, GC can release a layer whose latest start was confirmed if no journal or mount references it. Loss of the journal alone does not prove release. When the latest start was not confirmed, idle TTL can reclaim the layer only if its slot has no previous confirmed use, release was recorded, and `upper` is empty. GC keeps layers with data or uncertain provenance and retries interrupted deletions using a receipt outside the deleted directory.
 
 The same API bridge also supports overrides from Pod template annotations. Set `gc_workload_annotations: true` on the node and use the [same annotations as the Helm deployment](k3s/README.md#override-gc-per-workload).
+
+To disable both workload-based reclaim policies for existing released layers, set `gc_on_workload_delete`, `gc_on_scale_to_zero`, and `gc_workload_annotations` to `false` on every GC node. Layers already moved to the retirement directory remain eligible for deletion. Set `gc_idle_ttl: "0s"` as well if released layers must be kept indefinitely.
 
 On each manually configured node, use these systemd units to run `gc` periodically. The service must run as root and use the same config, environment overrides, and mount namespace as the runtime. The example assumes containerd uses the default config and does not isolate its mount namespace. If the runtime shim uses a separate mount namespace, run GC in that namespace.
 
@@ -202,8 +213,10 @@ Set the variables to the values used by the shim and the failed container. Befor
 
 ## Security and image upgrades
 
+For a security update, pin the replacement image by digest and verify that the replacement starts with a clean writable layer before restoring application data. A storage alias pointing to an unused local root lets a StatefulSet keep its name while starting with a clean layer. Keep the prior layer for rollback under your backup and retention policy.
+
 - A node administrator must install and manage the wrapper because it mounts filesystems on the host. The example container is unprivileged, but runs as UID 0 to write to `/` and `/etc`, so it does not satisfy the Restricted Pod Security policy's non-root requirement. Use an authorized test namespace rather than relaxing admission policy for the whole cluster.
-- Allow only trusted workloads to use this RuntimeClass and its persistence annotations. You can enforce this with admission policy. With the Node authorizer and NodeRestriction enabled, the example label key prevents kubelets from assigning themselves that label. Because a layer is identified by namespace and Pod name, reusing a name can expose old data. Restrict access to node data and back up and archive it as needed. Volumes, Secret projections, `/proc`, and other separate mounts have their own lifecycles.
+- Allow only trusted workloads to use this RuntimeClass and its persistence annotations. You can enforce this with admission policy. With the Node authorizer and NodeRestriction enabled, the example label key prevents kubelets from assigning themselves that label. PermaBox verifies StatefulSet identity before reusing stored data. Restrict access to node data and back up and archive it as needed. Volumes, Secret projections, `/proc`, and other separate mounts have their own lifecycles.
 - In production, pin the image digest for the lower layer. OverlayFS prefers the upper layer: file changes usually trigger copy-up, deletions create whiteouts, and some directories can be marked opaque. Reusing an old upper can override or hide files from a new image, including security fixes. Changing the image does not merge the two layers.
 - Never edit a mounted lower or upper layer directly. Before upgrading, stop the instance, confirm that its mounts are gone, record the old image digest, and back up the upper layer. Create a clean upper with a new Pod identity or storage location, migrate only the application data you need, and verify it before switching over. A whole-layer backup must preserve ownership, permissions, extended attributes, and special entries such as whiteouts. For rollback, restore the old image and its matching upper together.
 - The root filesystem prepared by the containerd snapshotter may already be OverlayFS. Verify the full procedure on the target node, since nested overlays depend on the kernel, snapshotter, and filesystem. If a mount fails, check kernel logs, overlay depth, and filesystem restrictions before considering a tested non-OverlayFS snapshotter. Node-local storage does not provide failover to another node.
