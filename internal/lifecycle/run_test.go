@@ -267,6 +267,7 @@ func TestOwnershipCommitFailureDoesNotChangeStartStatus(t *testing.T) {
 }
 
 func TestRuntimeOverrideStaysPinnedUntilDelete(t *testing.T) {
+	t.Setenv("TEST_TRUSTED_NAMESPACES", "[trusted]")
 	base := privateStateDir(t)
 	bundle := filepath.Join(base, "bundle")
 	if err := os.Mkdir(bundle, 0700); err != nil {
@@ -277,8 +278,18 @@ func TestRuntimeOverrideStaysPinnedUntilDelete(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	write(filepath.Join(bundle, "config.json"), `{"annotations":{"permabox.io/underlying-runtime":"alternate"}}`)
 	write(filepath.Join(base, "alternate"), "#!/bin/sh\nprintf 'alternate %s\\n' \"$1\"\nexit \"$TEST_STATUS\"\n")
+	for _, namespace := range []string{"", "untrusted"} {
+		write(filepath.Join(bundle, "config.json"), fmt.Sprintf(`{"annotations":{"io.kubernetes.cri.sandbox-namespace":%q,"permabox.io/underlying-runtime":"alternate"}}`, namespace))
+		out, stderr, code := call(t, base, "0", "create", "--bundle", bundle, "test-id")
+		if out != "" || stderr != "" || code != 1 {
+			t.Fatalf("runtime override from namespace %q: %q %q %d", namespace, out, stderr, code)
+		}
+		if _, err := os.Stat(filepath.Join(base, "test-id.runtime")); !os.IsNotExist(err) {
+			t.Fatalf("denied runtime override left a route: %v", err)
+		}
+	}
+	write(filepath.Join(bundle, "config.json"), `{"annotations":{"io.kubernetes.cri.sandbox-namespace":"trusted","permabox.io/underlying-runtime":"alternate"}}`)
 	for _, tc := range []struct {
 		command, status string
 		code            int
@@ -301,7 +312,7 @@ func TestRuntimeOverrideStaysPinnedUntilDelete(t *testing.T) {
 	if out != "state\ntest-id\nforwarded\n" {
 		t.Fatalf("after delete: %q", out)
 	}
-	write(filepath.Join(bundle, "config.json"), `{"annotations":{"permabox.io/underlying-runtime":"/usr/bin/unsafe"}}`)
+	write(filepath.Join(bundle, "config.json"), `{"annotations":{"io.kubernetes.cri.sandbox-namespace":"trusted","permabox.io/underlying-runtime":"/usr/bin/unsafe"}}`)
 	out, stderr, code := call(t, base, "0", "create", "--bundle", bundle, "new-id")
 	if out != "" || stderr != "" || code != 1 {
 		t.Fatalf("unknown alias: %q %q %d", out, stderr, code)

@@ -148,6 +148,7 @@ const (
 type BundleOptions struct {
 	Persistence                *Bundle
 	StorageAlias, RuntimeAlias string
+	Namespace                  string
 }
 
 type invalidPersistence struct{ error }
@@ -181,13 +182,14 @@ func InspectBundle(bundle, annotation string) (BundleOptions, error) {
 	if crioType == "container" {
 		name = a["io.kubernetes.container.name"]
 	}
-	options.RuntimeAlias = a[RuntimeAnnotation]
-	if a[annotation] != "true" || (a["permabox.io/container"] != "" && a["permabox.io/container"] != name) {
-		return options, nil
-	}
 	ns, pod, uid := a["io.kubernetes.cri.sandbox-namespace"], a["io.kubernetes.cri.sandbox-name"], a["io.kubernetes.cri.sandbox-uid"]
 	if crioType == "container" || (ns == "" && pod == "") {
 		ns, pod = a["io.kubernetes.pod.namespace"], a["io.kubernetes.pod.name"]
+	}
+	options.Namespace = ns
+	options.RuntimeAlias = a[RuntimeAnnotation]
+	if a[annotation] != "true" || (a["permabox.io/container"] != "" && a["permabox.io/container"] != name) {
+		return options, nil
 	}
 	if crioType == "container" {
 		uid = a["io.kubernetes.pod.uid"]

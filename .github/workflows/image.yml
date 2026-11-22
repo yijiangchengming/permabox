@@ -8,11 +8,28 @@ permissions:
   contents: read
 
 jobs:
+  release-source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require a commit from main
+        shell: bash
+        run: |
+          if ! git merge-base --is-ancestor HEAD refs/remotes/origin/main; then
+            echo 'Release tags must point to a commit in main history.' >&2
+            exit 1
+          fi
+
   verify:
+    needs: release-source
     uses: ./.github/workflows/ci.yml
 
   publish:
-    needs: verify
+    needs: [release-source, verify]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:

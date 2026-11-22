@@ -64,12 +64,12 @@ Chart 将同一套 `nodeSelector` 和 `tolerations` 应用于安装器和 Runtim
 | `underlyingRuntimes` | `{}`；运行时别名到宿主机绝对二进制路径的映射 |
 | `gcIdleTTL` | `"0s"`；Go 时长，默认保留已释放的持久化数据，GC 仍重试残留清理 |
 | `gcOnWorkloadDelete` | `false`；设为 `true` 后，删除 StatefulSet 时回收其已安全释放的写层 |
-| `gcOnScaleToZero` | `false`；设为 `true` 后，StatefulSet 的 `spec.replicas` 为 `0` 时回收其已安全释放的写层 |
+| `gcOnScaleToZero` | 默认 `false`。开启后，StatefulSet 的 `spec.replicas` 为 `0` 时回收其已释放的写层。若需保留缩到零后的数据，请保持关闭，并避免通过工作负载注解启用。 |
 | `gcWorkloadAnnotations` | `false`；设为 `true` 后，允许 Pod 模板注解单独覆盖上面两项默认值 |
 | `gcIntervalSeconds` | `60`；每次 GC 前等待的秒数（正整数） |
 | `persistAnnotation` | `permabox.io/persist`；更改后须同步修改业务 Pod |
 
-在 Pod 上用 `permabox.io/storage-root` 为选中的持久化容器指定存储别名，用 `permabox.io/underlying-runtime` 为业务容器指定运行时别名。sandbox 使用创建时的默认运行时。升级时请使用新的发布镜像标签，或用新标签推送自定义构建。仍有容器记录时，安装器允许调整工作负载回收开关，以及将旧默认套接字迁移到 Bridge 专用目录。修改其他运行时配置前，请先停止 PermaBox 工作负载。参见[别名配置](../README-cn.md#1-安装到目标节点)。
+在 Pod 上用 `permabox.io/storage-root` 为选中的持久化容器指定存储别名。命名空间列入 `trustedNamespaces` 的 Pod 可以用 `permabox.io/underlying-runtime` 为业务容器指定运行时别名。sandbox 使用创建时的默认运行时。参见[别名配置](../README-cn.md#1-安装到目标节点)。升级时请使用新的发布镜像标签，或用新标签推送自定义构建。仍有容器记录时，安装器允许调整工作负载回收开关，以及将旧默认套接字迁移到 Bridge 专用目录。修改其他运行时配置前，请先停止 PermaBox 工作负载。
 
 发布运行时版本前，安装器会验证暂存配置，并获取创建准入锁。它使用 OCI 分发的同一套路径和可执行文件检查，验证默认运行时、每个配置的别名，以及 `/run/permabox` 中每条容器路由固定的运行时。K3s 的 `data/current` 链接仍可使用，前提是链接路径和目标均由 root 控制。解析到 PermaBox 包装器或二进制的路径会被拒绝。升级前，请在每个选定节点检查自定义运行时和存储路径。存储根目录及其中的命名空间和写层目录须为普通目录，且只有 root 可以写入。
 
@@ -94,6 +94,8 @@ Chart 将同一套 `nodeSelector` 和 `tolerations` 应用于安装器和 Runtim
 手动删除 Pod、滚动更新和缩容到非零副本数不会单独触发这两项策略。删除 StatefulSet 可在下一次符合条件的扫描回收；缩到 0 则需至少等待首次批准一分钟，并由后续扫描再次确认。两项策略只处理已释放且归属已确认的写层。回收保护规则见[定期回收](../README-cn.md#定期回收gc)。
 
 ### 按工作负载覆盖回收策略
+
+如需对现有写层关闭两项工作负载回收策略，请将 `gcOnWorkloadDelete=false`、`gcOnScaleToZero=false` 和 `gcWorkloadAnnotations=false` 一并设置。已经移入回收目录的写层仍可能被删除。如需长期保留已释放写层，还应设置 `gcIdleTTL=0s`。
 
 通过 Helm 传入 `--set gcWorkloadAnnotations=true` 后，在 StatefulSet 的 Pod 模板中按需设置注解。即使两个全局默认值均为 `false`，也可以只为指定工作负载开启：
 

@@ -66,12 +66,12 @@ The chart applies the same `nodeSelector` and `tolerations` to the installer and
 | `underlyingRuntimes` | `{}`. Maps runtime aliases to absolute binary paths on the host. |
 | `gcIdleTTL` | `"0s"`. A Go duration; by default, GC retains released data and still retries stale cleanup. |
 | `gcOnWorkloadDelete` | `false`. Enable to reclaim safely released writable layers when their StatefulSet is deleted. |
-| `gcOnScaleToZero` | `false`. Enable to reclaim safely released writable layers when their StatefulSet has `spec.replicas: 0`. |
+| `gcOnScaleToZero` | `false`. Enable to reclaim released writable layers when their StatefulSet has `spec.replicas: 0`. Leave disabled and avoid enabling the workload override when data must survive scale-to-zero. |
 | `gcWorkloadAnnotations` | `false`. Enable to let Pod template annotations override the two workload GC defaults individually. |
 | `gcIntervalSeconds` | `60`. A positive integer giving the wait in seconds before each GC sweep. |
 | `persistAnnotation` | `permabox.io/persist`. Update the workload Pod annotations if you change this key. |
 
-Use `permabox.io/storage-root` to set a storage alias for the container selected for persistence. Use `permabox.io/underlying-runtime` to set a runtime alias for the workload containers. The sandbox uses the default runtime from the time it was created. When upgrading, use a new release image tag or push your custom build with a new tag. While container records exist, the installer permits changes to the workload GC switches and migration from the old default socket to the dedicated bridge socket. Stop PermaBox workloads before changing other runtime settings. See [storage and runtime aliases](../README.md#1-install-on-the-target-node).
+Use `permabox.io/storage-root` to set a storage alias for the container selected for persistence. Workload containers can select a runtime alias with `permabox.io/underlying-runtime` when their namespace is listed in `trustedNamespaces`. The sandbox uses the default runtime from the time it was created. See [storage and runtime aliases](../README.md#1-install-on-the-target-node). When upgrading, use a new release image tag or push your custom build with a new tag. While container records exist, the installer permits changes to workload GC switches and migration from the old default socket to the dedicated bridge socket. Stop PermaBox workloads before changing other runtime settings.
 
 Before publishing a generation, the installer validates the staged config and takes the create admission lock. It checks the default runtime, each configured alias, and each runtime still pinned under `/run/permabox` using the same path and executable checks as OCI dispatch. K3s's `data/current` link is accepted when its path and target are controlled by root. A path that resolves to the PermaBox wrapper or binary is rejected. Check custom runtime and storage paths on every selected node before upgrading. Storage roots and their namespace and slot directories must be free of symlinks and writable only by root.
 
@@ -98,6 +98,8 @@ Layers left by Deployments from earlier versions can still be reclaimed through 
 Deleting a Pod by hand, rolling out an update, or scaling to a nonzero replica count does not by itself trigger either policy. Deletion is eligible on the next sweep; scaling to zero requires a second sweep at least one minute after approval. The policies apply only to released writable layers with confirmed ownership. See [periodic garbage collection](../README.md#periodic-garbage-collection) for the safeguards.
 
 ### Override GC per workload
+
+To stop both workload-based reclaim policies for existing layers, set `gcOnWorkloadDelete=false`, `gcOnScaleToZero=false`, and `gcWorkloadAnnotations=false`. Already retired layers can still be deleted. Set `gcIdleTTL=0s` too if released layers must be retained indefinitely.
 
 Set `--set gcWorkloadAnnotations=true` in Helm, then add the desired annotations to the StatefulSet Pod template. You can enable a policy for an individual workload even when both global defaults are `false`:
 

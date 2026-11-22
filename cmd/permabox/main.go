@@ -94,7 +94,7 @@ func main() {
 }
 
 func logError(path, format string, args ...any) {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND|syscall.O_NONBLOCK, 0600)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0600)
 	if err != nil {
 		return
 	}
