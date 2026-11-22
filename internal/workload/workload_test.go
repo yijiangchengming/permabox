@@ -63,7 +63,11 @@ func TestUnixBridgePreservesAuthoritativeNotFound(t *testing.T) {
 		fmt.Fprint(w, `{"reason":"NotFound","details":{"name":"app"}}`)
 	}))
 	defer upstream.Close()
-	path := filepath.Join(t.TempDir(), "bridge.sock")
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "bridge.sock")
 	listener, err := net.Listen("unix", path)
 	if err != nil {
 		t.Fatal(err)
@@ -94,6 +98,9 @@ func TestUnixBridgePreservesAuthoritativeNotFound(t *testing.T) {
 
 func TestCheckSocketRequiresPrivateDirectory(t *testing.T) {
 	dir := t.TempDir()
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
 	path := filepath.Join(dir, "bridge.sock")
 	listener, err := net.Listen("unix", path)
 	if err != nil {
