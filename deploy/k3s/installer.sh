@@ -3,6 +3,7 @@ set -euo pipefail
 umask 077
 
 install_dir=/opt/permabox-k3s
+bridge_dir=/opt/permabox-k3s-bridge
 wrapper=$install_dir/runtime
 begin='# BEGIN PermaBox managed runtime'
 end='# END PermaBox managed runtime'
@@ -18,11 +19,9 @@ service_cmd() {
   timeout 20 nsenter --target 1 --mount --pid --root --wd=/ -- /bin/systemctl "$@"
 }
 
-cri() {
-  timeout 15 nsenter --target 1 --mount --pid --root --wd=/ -- "$k3s_bin" crictl --runtime-endpoint "$endpoint" "$@"
+cri_info() {
+  timeout 15 nsenter --target 1 --mount --pid --root --wd=/ -- "$1" crictl --runtime-endpoint "$endpoint" info
 }
-
-cri_info() { cri info; }
 restart_service() {
   timeout "${RESTART_TIMEOUT:-180}" nsenter --target 1 --mount --pid --root --wd=/ -- /bin/systemctl restart "$unit"
 }
@@ -41,9 +40,17 @@ select_unit() {
       ;;
     *) [[ $unit =~ ^[A-Za-z0-9_.@-]+\.service$ && $unit != -* ]] || { fail 'invalid K3S_SERVICE'; return 1; } ;;
   esac
+  check_unit_process
+}
+
+check_unit_process() {
   local pid
-  if ! pid=$(service_cmd show --property=MainPID --value "$unit") || [[ ! $pid =~ ^[1-9][0-9]*$ ]]; then
-    fail "service $unit has no active main process"; return 1
+  if ! pid=$(service_cmd show --property=MainPID --value "$unit") || [[ ! $pid =~ ^(0|[1-9][0-9]*)$ ]]; then
+    fail "could not determine the main process for $unit"; return 1
+  fi
+  if [[ $pid == 0 ]]; then
+    printf 'permabox-k3s: service %s has no active main process\n' "$unit" >&2
+    return 2
   fi
   # The stock K3s launcher can exec the bundled server or agent in place.
   if ! host_exec /usr/bin/test "$k3s_bin" -ef "/proc/$pid/exe" &&
@@ -71,8 +78,9 @@ desired_handler() {
 }
 
 get_info() {
-  local info
-  info=$(cri_info) && jq -e '.config.containerd.runtimes | type == "object"' >/dev/null <<<"$info" || return 1
+  local info executable payload=${PAYLOAD:-/usr/local/lib/permabox/permabox}
+  executable=$("$payload" validate-host-executable /proc/1/root "$k3s_bin") || return 1
+  info=$(cri_info "$executable") && jq -e '.config.containerd.runtimes | type == "object"' >/dev/null <<<"$info" || return 1
   printf '%s\n' "$info"
 }
 
@@ -100,7 +108,8 @@ strip_block() {
 }
 
 rollback_transaction() (
-  local txn=$install_host/.transaction restore_template restore_unit asset restored
+  local txn=$install_host/.transaction restore_template restore_unit asset restored generation
+  local rollback_payload=${PAYLOAD:-/usr/local/lib/permabox/permabox}
   [[ -d $txn ]] || return 0
   local incoming_dir=$data_dir
   IFS= read -r restore_template <"$txn/template-name" || return 1
@@ -116,9 +125,26 @@ rollback_transaction() (
   case "$restore_template" in config.toml.tmpl|config-v3.toml.tmpl) ;; *) return 1 ;; esac
   [[ $restore_unit =~ ^[A-Za-z0-9_.@-]+\.service$ && $restore_unit != -* ]] || return 1
   unit=$restore_unit
-  dir=$host$data_dir/agent/etc/containerd
+  local previous_handler process_status=0
+  check_unit_process 2>/dev/null || process_status=$?
+  if [[ $process_status != 0 && $process_status != 2 ]]; then
+    fail "refusing to restore files or restart $unit with an unverified main process"; return 1
+  fi
+  if [[ -e $txn/restart ]]; then
+    previous_handler=$(<"$txn/previous-handler") || return 1
+  fi
+  if [[ -e $txn/current || -L $txn/current ]]; then
+    generation=$(readlink "$txn/current") || return 1
+    [[ $generation =~ ^versions/[a-f0-9]{64}$ ]] || { fail 'invalid rollback runtime generation'; return 1; }
+    "$rollback_payload" verify-runtime-cache "$install_host/versions" "${generation#versions/}" || return 1
+  fi
+  dir=$(containerd_directory "$data_dir") || return 1
+  "$rollback_payload" validate-containerd-directory "$dir" || return 1
   restore_template=$dir/$restore_template
   template=$restore_template
+  if [[ -L $txn/template || ( -e $txn/template && ! -f $txn/template ) ]]; then
+    fail 'rollback template backup must be a regular file'; return 1
+  fi
   if [[ -f $txn/template ]]; then
     if ! cmp -s "$txn/template" "$restore_template"; then
       restored=$(mktemp "$dir/.permabox-restore.XXXXXXXX") || return 1
@@ -139,12 +165,15 @@ rollback_transaction() (
   done
   sync -f "$dir" && sync -f "$install_host" || return 1
   if [[ -e $txn/restart ]]; then
-    local previous_handler
-    previous_handler=$(<"$txn/previous-handler") || return 1
-    if ! live_handler_matches "$previous_handler"; then
+    process_status=0
+    check_unit_process 2>/dev/null || process_status=$?
+    if [[ $process_status != 0 && $process_status != 2 ]]; then
+      fail "refusing to restart $unit with an unverified main process"; return 1
+    fi
+    if [[ $process_status == 2 ]] || ! live_handler_matches "$previous_handler"; then
       restart_service || return 1
       local deadline=$((SECONDS + ${RESTART_TIMEOUT:-180}))
-      until live_handler_matches "$previous_handler"; do
+      until check_unit_process 2>/dev/null && live_handler_matches "$previous_handler"; do
         (( SECONDS < deadline )) || return 1
         sleep 2
       done
@@ -166,6 +195,10 @@ valid_host_path() {
   [[ $1 =~ ^(/[A-Za-z0-9_.-]+)+$ && /$1/ != */../* && /$1/ != */./* ]]
 }
 
+containerd_directory() {
+  printf '/proc/1/root%s/agent/etc/containerd\n' "$1"
+}
+
 finish_transaction() {
   local txn=$1 finished
   finished=$(mktemp -d "$install_host/.finished.XXXXXXXX") || return 1
@@ -178,9 +211,10 @@ publish_runtime() {
   local stage=$1 digest generation
   digest=$(sha256sum "$stage/permabox" "$stage/config.yaml" | awk '{ print $1 }' | sha256sum) || return 1
   generation=versions/${digest%% *}
-  mkdir -p "$install_host/versions" || return 1
+  "$payload" prepare-runtime-cache "$install_host/versions" "${digest%% *}" || return 1
   if [[ ! -d $install_host/$generation ]]; then
-    mkdir "$stage/version" && mv "$stage/permabox" "$stage/config.yaml" "$stage/version/" &&
+    mkdir "$stage/version" && chmod 0700 "$stage/version" &&
+      mv "$stage/permabox" "$stage/config.yaml" "$stage/version/" &&
       mv -T "$stage/version" "$install_host/$generation" || return 1
   fi
   ln -s "$generation" "$stage/current" && mv -fT "$stage/current" "$install_host/current" &&
@@ -241,6 +275,7 @@ write_runtime() {
   write_wrapper >"$tmpdir/runtime" || return 1
   # JSON is also valid YAML; jq preserves paths containing quotes or whitespace.
   jq -n --arg storage "$storage" --arg runtime "$underlying" --arg annotation "$annotation" \
+    --arg socket "$bridge_dir/workload.sock" \
     --argjson storage_roots "${STORAGE_ROOTS:-$empty_map}" --argjson runtimes "${UNDERLYING_RUNTIMES:-$empty_map}" \
     --argjson on_delete "${GC_ON_WORKLOAD_DELETE:-false}" --argjson on_zero "${GC_ON_SCALE_TO_ZERO:-false}" \
     --argjson workload_annotations "${GC_WORKLOAD_ANNOTATIONS:-false}" \
@@ -253,19 +288,18 @@ write_runtime() {
       else
         {storage_root: $storage, underlying_runtime: $runtime, log_file: "/var/log/permabox.log",
          persist_annotation: $annotation, storage_roots: $storage_roots, underlying_runtimes: $runtimes,
-         gc_idle_ttl: $ttl}
+         gc_idle_ttl: $ttl, workload_socket: $socket}
         + (if $on_delete == false then {} else {gc_on_workload_delete: $on_delete} end)
         + (if $on_zero == false then {} else {gc_on_scale_to_zero: $on_zero} end)
         + (if $workload_annotations == false then {} else {gc_workload_annotations: $workload_annotations} end)
         + (if $trusted == [] then {} else {trusted_namespaces: $trusted} end)
       end
     ' >"$tmpdir/config.yaml" || return 1
+  chmod 0600 "$tmpdir/config.yaml" || return 1
   PERMABOX_CONFIG="$tmpdir/config.yaml" "$payload" validate-config || {
     fail 'PermaBox payload rejected the staged runtime configuration'; return 1
   }
   config_change_allowed "$tmpdir/config.yaml" || return 1
-  # Check the path as it will resolve on the node.
-  host_exec /usr/bin/test -x "$underlying" || { fail "underlying runtime not executable: $underlying"; return 1; }
   install -m 0755 "$payload" "$tmpdir/permabox" || return 1
   chmod 0755 "$tmpdir/runtime"
 }
@@ -276,7 +310,10 @@ config_change_allowed() {
   # Trust changes are subject to the same idle check as other runtime settings.
   if [[ -f $previous ]] && ! cmp -s "$staged" "$previous" && active_records; then
     local filter='del(.gc_on_workload_delete, .gc_on_scale_to_zero, .gc_workload_annotations)'
-    if ! new_config=$(jq -S "$filter" "$staged") || ! old_config=$(jq -S "$filter" "$previous") || [[ $new_config != "$old_config" ]]; then
+    if ! new_config=$(jq -S "$filter" "$staged") ||
+      ! old_config=$(jq -S --arg legacy "$install_dir/workload.sock" --arg socket "$bridge_dir/workload.sock" \
+        "$filter"' | if .workload_socket == null or .workload_socket == "" or .workload_socket == $legacy
+                     then .workload_socket = $socket else . end' "$previous") || [[ $new_config != "$old_config" ]]; then
       fail 'stop PermaBox workloads before changing runtime settings'; return 1
     fi
   fi
@@ -350,7 +387,7 @@ socket_identity() { stat -c '%d:%i:%z' -- "$1" 2>/dev/null; }
 bridge_healthy() {
   local identity
   identity=$(socket_identity "$socket") &&
-    [[ $(cat "$socket.ready" 2>/dev/null) == "$OWNER $identity" ]] &&
+    "$payload" check-bridge-marker "$socket.ready" "$OWNER $identity" &&
     "$payload" check-workload-bridge "$socket" && [[ $(socket_identity "$socket") == "$identity" ]]
 }
 
@@ -365,12 +402,12 @@ wait_bridge() {
 }
 
 bridge_main() {
+  # The chart mounts the dedicated host directory at this path for older images.
   local install_host=${HOST_ROOT:-/host}$install_dir payload=${PAYLOAD:-/usr/local/lib/permabox/permabox}
   local socket=$install_host/workload.sock ready=${BRIDGE_READY_FILE:-/tmp/permabox-bridge-ready}
   local bridge_pid='' previous identity staged=''
   [[ ${OWNER:-} =~ ^[a-z0-9.-]+/[a-z0-9.-]+$ ]] || { fail 'invalid bridge release owner'; return 1; }
-  [[ ! -L $install_host ]] && mkdir -p "$install_host" && chmod 0700 "$install_host" || return 1
-  if [[ -f $install_host/owner && $(<"$install_host/owner") != "$OWNER" ]]; then
+  if [[ -e $install_host/owner || -L $install_host/owner ]] && ! "$payload" check-bridge-marker "$install_host/owner" "$OWNER"; then
     fail 'runtime is owned by another Helm release'; return 1
   fi
   rm -f "$ready"
@@ -400,7 +437,12 @@ bridge_main() {
 
 bridge_probe() {
   local socket=${HOST_ROOT:-/host}$install_dir/workload.sock payload=${PAYLOAD:-/usr/local/lib/permabox/permabox}
-  { [[ ${1:-} == --node ]] || [[ -f ${BRIDGE_READY_FILE:-/tmp/permabox-bridge-ready} ]]; } && bridge_healthy
+  if [[ ${1:-} == --node ]]; then
+    socket=${HOST_ROOT:-/host}$bridge_dir/workload.sock
+  else
+    [[ -f ${BRIDGE_READY_FILE:-/tmp/permabox-bridge-ready} ]] || return 1
+  fi
+  bridge_healthy
 }
 
 reconcile_node() {
@@ -415,28 +457,32 @@ reconcile_node() {
   annotation=${PERSIST_ANNOTATION:-permabox.io/persist}
   ready=${READY_FILE:-/tmp/permabox-ready}
   install_host=$host$install_dir
-  dir=$host$data_dir/agent/etc/containerd
+  dir=$(containerd_directory "$data_dir") || return 1
   rm -f "$ready"
   case "$mode" in install|remove) ;; *) fail 'MODE must be install or remove'; return 1 ;; esac
   [[ ${OWNER:-} =~ ^[a-z0-9.-]+/[a-z0-9.-]+$ && $annotation =~ ^[A-Za-z0-9./_-]+$ ]] || { fail 'invalid release owner or annotation'; return 1; }
-  [[ ! -L $install_host ]] || { fail 'install directory cannot be a symlink'; return 1; }
-  mkdir -p "$install_host" || return 1
   local lock info plugin version stem old=0 configured=0 path
-  local socket=$install_host/workload.sock payload=${PAYLOAD:-/usr/local/lib/permabox/permabox} admission_lock=''
+  local socket=$host$bridge_dir/workload.sock payload=${PAYLOAD:-/usr/local/lib/permabox/permabox} admission_lock=''
+  "$payload" prepare-installer-state "$install_host" || return 1
   # The worker's EXIT trap also runs after this function returns.
   tmpdir='' candidate='' sleep_pid='' worker_mode=${1:-}
   trap 'exit 0' TERM INT
-  exec {lock}>"$install_host/lock" && flock -w 60 "$lock" || return 1
+  exec {lock}>>"$install_host/lock" && flock -w 60 "$lock" || return 1
   trap 'reconcile_exit "$?"' EXIT
   if [[ -f $install_host/owner && $(<"$install_host/owner") != "$OWNER" ]]; then
     fail 'runtime is owned by another Helm release'; return 1
   fi
   if [[ -e $install_host/.transaction/admission-v1 ]]; then lock_admission || return 1; fi
   rollback_transaction || { fail 'could not recover interrupted node configuration'; return 1; }
+  if [[ $mode == install ]]; then
+    "$payload" validate-installed-runtime "$install_host" || return 1
+  fi
   for path in "$data_dir" "$storage" "$underlying" "$k3s_bin"; do
     valid_host_path "$path" || { fail "invalid host path: $path"; return 1; }
   done
+  "$payload" validate-containerd-directory "$dir" || return 1
   [[ -s $dir/config.toml ]] || { fail 'K3s embedded containerd configuration not found'; return 1; }
+  select_unit || return 1
   info=$(get_info) || { fail 'could not read live K3s CRI configuration'; return 1; }
   if has_handler "$info"; then
     configured=1
@@ -462,9 +508,6 @@ reconcile_node() {
       fail 'drain PermaBox workloads before migrating the legacy runtime wrapper, then set allowLegacyWrapperMigration=true'; return 1
     fi
   fi
-  if [[ $mode == install ]]; then chmod 0700 "$install_host" || return 1; fi
-  select_unit || return 1
-
   version=$(sed -nE 's/^[[:space:]]*version[[:space:]]*=[[:space:]]*([23])[[:space:]]*(#.*)?$/\1/p' "$dir/config.toml")
   case "$version" in
     2) stem=config.toml.tmpl; plugin=io.containerd.grpc.v1.cri ;;
@@ -509,11 +552,13 @@ reconcile_node() {
     fi
     printf '%s\n[plugins."%s".containerd.runtimes.permabox]\n  runtime_type = "io.containerd.runc.v2"\n  pod_annotations = ["%s", "permabox.io/container", "permabox.io/storage-root", "permabox.io/underlying-runtime"]\n[plugins."%s".containerd.runtimes.permabox.options]\n  BinaryName = "%s"\n  SystemdCgroup = %s\n%s\n' \
       "$begin" "$plugin" "$annotation" "$plugin" "$wrapper" "$systemd" "$end" >>"$candidate" || return 1
+    "$payload" prepare-bridge-state "$host$bridge_dir" "$OWNER" || return 1
     wait_bridge || return 1
     lock_admission || return 1
     if [[ -f $install_host/owner ]] && ! gated_wrapper && active_records; then
       fail 'drain PermaBox workloads before migrating the legacy runtime wrapper'; return 1
     fi
+    PERMABOX_CONFIG="$tmpdir/config.yaml" "$payload" validate-host-runtimes /proc/1/root "$wrapper" || return 1
   fi
 
   local action=none restart=0

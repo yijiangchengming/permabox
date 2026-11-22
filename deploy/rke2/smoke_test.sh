@@ -43,8 +43,9 @@ cleanup() {
 trap cleanup EXIT
 
 node_exec "$rke2" --version
+node_exec install -d -o root -g root -m 0755 /opt
 node_exec install -d "$agent/etc/containerd" /etc/permabox
-node_exec install -d -m 0700 /opt/permabox
+node_exec install -d -o root -g root -m 0700 /opt/permabox
 node_exec install -m 0755 bin/permabox /usr/local/bin/permabox
 {
   printf '%s\n' '{{ template "base" . }}'

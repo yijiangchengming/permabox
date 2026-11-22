@@ -44,7 +44,7 @@ cleanup() {
 
 trap cleanup EXIT
 
-mkdir -p "$work/storage"
+sudo install -d -o root -g root -m 0755 "$work/storage"
 {
   printf '%s\n' 'kind: Cluster' 'apiVersion: kind.x-k8s.io/v1alpha4' 'nodes:' '  - role: control-plane' '    extraMounts:'
   printf '      - hostPath: %s\n        containerPath: /var/lib/permabox\n' "$work/storage"
@@ -63,7 +63,8 @@ if [[ $runtime == crun ]]; then
   node_exec apt-get install -y -qq --no-install-recommends crun dbus
   node_exec systemctl start dbus.socket
 fi
-node_exec install -d -m 0700 /opt/permabox
+node_exec install -d -o root -g root -m 0755 /opt
+node_exec install -d -o root -g root -m 0700 /opt/permabox
 node_exec install -d /etc/permabox
 # shellcheck disable=SC2016
 runtime_bin=$(node_exec sh -c 'command -v "$1"' sh "$runtime")

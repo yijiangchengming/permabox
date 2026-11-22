@@ -58,8 +58,9 @@ cleanup() {
 trap cleanup EXIT
 
 node_exec "$k0s" version
+node_exec install -d -o root -g root -m 0755 /opt
 node_exec install -d -m 0755 /etc/k0s/containerd.d /etc/permabox
-node_exec install -d -m 0700 /opt/permabox
+node_exec install -d -o root -g root -m 0700 /opt/permabox
 node_exec install -m 0755 bin/permabox /usr/local/bin/permabox
 # The stock k0s single-node profile uses cgroupfs.
 sed 's/SystemdCgroup = true/SystemdCgroup = false/' deploy/containerd-2.x-v3.toml |

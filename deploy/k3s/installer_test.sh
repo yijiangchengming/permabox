@@ -4,19 +4,38 @@ cd "$(dirname "$0")"
 # shellcheck source=deploy/k3s/installer.sh
 source ./installer.sh
 
+if [[ ${1:-all} == chart ]]; then
+  manifest=$("${HELM:-helm}" template permabox ../helm/permabox --show-only templates/bridge-daemonset.yaml \
+    --set-string image.repository=example.invalid/installer --set-string 'nodeSelector.kubernetes\.io/hostname=test-node' \
+    --set-string bridgeImage.tag=pinned)
+  if [[ $(awk '$1 == "path:" { print $2 }' <<<"$manifest") != /opt/permabox-k3s-bridge ]]; then
+    printf '%s\n' 'expected the bridge to mount only its dedicated host directory' >&2; exit 1
+  fi
+  grep -Fq 'mountPath: /host/opt/permabox-k3s' <<<"$manifest"
+  grep -Fq 'image: "example.invalid/installer:pinned"' <<<"$manifest"
+  exit 0
+fi
+
 reconcile() ( reconcile_node once )
 
 tmp=$(mktemp -d)
 bridge_supervisor=''
 legacy_pid=''
-trap 'for pid in "$bridge_supervisor" "$legacy_pid"; do if [[ -n $pid ]]; then kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi; done; rm -rf "$tmp"' EXIT
+create_pid=''
+trap 'for pid in "$create_pid" "$bridge_supervisor" "$legacy_pid"; do if [[ -n $pid ]]; then kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; fi; done; rm -rf "$tmp"' EXIT
 export HOST_ROOT="$tmp/host" OWNER=default/permabox K3S_DATA_DIR=/data
 export READY_FILE="$tmp/ready" PAYLOAD="$tmp/permabox" RESTART_TIMEOUT=2
 export BRIDGE_READY_FILE="$tmp/bridge-ready"
+export PERMABOX_STATE_HELPER="$tmp/state-helper"
+"${GO:-go}" build -o "$PERMABOX_STATE_HELPER" ../../cmd/permabox
 mkdir -p "$HOST_ROOT/data/agent/etc/containerd" "$HOST_ROOT/data/data/current/bin" "$HOST_ROOT/run"
 # The fixture expands these variables when invoked as the payload.
 # shellcheck disable=SC2016
 printf '%s\n' '#!/bin/sh' \
+  'case "${1:-}" in' \
+  '  prepare-bridge-state|check-bridge-marker|prepare-installer-state|prepare-runtime-cache|verify-runtime-cache|validate-installed-runtime|validate-containerd-directory) exec "$PERMABOX_STATE_HELPER" "$@";;' \
+  '  validate-host-executable|validate-host-runtimes) [ "$2" = /proc/1/root ] && exec "$PERMABOX_STATE_HELPER" "$1" "$HOST_ROOT" "$3"; exit 1;;' \
+  'esac' \
   'if [ "${1:-}" = serve-workloads ]; then' \
   '  exec 8>>"$2.lock"; flock -n 8 || exit 1' \
   '  echo "$$" >"${READY_FILE}.bridge-pid"' \
@@ -24,6 +43,9 @@ printf '%s\n' '#!/bin/sh' \
   'fi' \
   'if [ "${1:-}" = check-workload-bridge ]; then' \
   '  [ -f "$2" ] && [ ! -f "${READY_FILE}.deny" ] && [ "${reject_bridge:-0}" = 0 ] || exit 1' \
+  '  if [ -n "${expect_bridge_generation:-}" ]; then' \
+  '    [ "$(readlink "$HOST_ROOT/opt/permabox-k3s/current")" = "$expect_bridge_generation" ] || exit 1' \
+  '  fi' \
   '  printf "%s\n" bridge >>"${READY_FILE}.events"; exit 0' \
   'fi' \
   'case "${1:-}" in' \
@@ -33,15 +55,20 @@ printf '%s\n' '#!/bin/sh' \
   '  create)' \
   '    echo "$$" >"${READY_FILE}.create"' \
   '    while [ ! -e "${READY_FILE}.release-create" ]; do sleep 0.05; done' \
-  '    touch "$HOST_ROOT/run/permabox/in-flight.runtime"; exit 0 ;;' \
+  '    jq -n --arg runtime "${FIXTURE_RUNTIME:-/data/data/current/bin/runc}" '\''{Runtime:$runtime,Bundle:"/bundle"}'\'' >"$HOST_ROOT/run/permabox/in-flight.runtime"; exit $? ;;' \
   '  delete) touch "${READY_FILE}.delete"; exit 0 ;;' \
   'esac' \
-  '[ "$#" -eq 1 ] && [ "$1" = validate-config ] || exit 1' \
+  '[ "$#" -eq 1 ] && [ "$1" = validate-config ] && [ "$(stat -c %a "$PERMABOX_CONFIG")" = 600 ] || exit 1' \
   'case "$PERMABOX_CONFIG" in "$HOST_ROOT"/opt/permabox-k3s/.stage.*/config.yaml) ;; *) exit 1 ;; esac' \
   '[ -s "$PERMABOX_CONFIG" ] && [ "${reject_config:-0}" = 0 ]' >"$PAYLOAD"
 chmod 0755 "$PAYLOAD"
 install -m 0755 "$PAYLOAD" "$HOST_ROOT/data/data/current/bin/runc"
+for fixture in /usr/local/bin/k3s /original/k3s /other/k3s; do
+  install -D -m 0755 "$PAYLOAD" "$HOST_ROOT$fixture"
+done
 templates="$HOST_ROOT/data/agent/etc/containerd"
+test "$(containerd_directory /data)" = /proc/1/root/data/agent/etc/containerd
+containerd_directory() { printf '%s%s/agent/etc/containerd\n' "$HOST_ROOT" "$1"; }
 printf '# generated\nversion = 3\n' >"$templates/config.toml"
 printf '{{ template "base" . }}\n# custom setting\n' >"$templates/config-v3.toml.tmpl"
 cp "$templates/config-v3.toml.tmpl" "$tmp/original"
@@ -52,7 +79,7 @@ fake_info() {
 cri_info() {
   # The mock observes the CRI coordinates in the caller's subshell.
   # shellcheck disable=SC2031
-  printf '%s %s %s\n' "$endpoint" "$k3s_bin" "$data_dir" >>"$tmp/cri-queries"
+  printf '%s %s %s\n' "$endpoint" "$1" "$data_dir" >>"$tmp/cri-queries"
   fake_info
 }
 host_exec() {
@@ -98,6 +125,85 @@ restart_service() {
 }
 
 export MODE=install
+state_dir="$HOST_ROOT/opt/permabox-k3s"
+mkdir -p "$state_dir"
+umask 000
+printf '%s\n' 'keep existing lock' >"$state_dir/lock"
+umask 077
+chmod 0777 "$state_dir"
+if BRIDGE_TIMEOUT=1 reconcile 2>"$tmp/unsafe-state-error"; then
+  printf '%s\n' 'accepted a writable installer state directory' >&2; exit 1
+fi
+test "$(<"$state_dir/lock")" = 'keep existing lock'
+grep -Fq 'unsafe directory' "$tmp/unsafe-state-error"
+test ! -e "$tmp/cri-queries"
+chmod 0700 "$state_dir"
+"$PERMABOX_STATE_HELPER" prepare-installer-state "$state_dir"
+test "$(stat -c %a "$state_dir/lock")" = 600
+rm "$state_dir/lock"
+
+chmod 0777 "$HOST_ROOT/usr/local/bin/k3s"
+if (k3s_bin=/usr/local/bin/k3s; endpoint=unix:///fixture.sock; data_dir=/data; get_info >/dev/null) 2>"$tmp/unsafe-probe-error"; then
+  printf '%s\n' 'queried CRI through a writable executable' >&2; exit 1
+fi
+test ! -e "$tmp/cri-queries"
+chmod 0755 "$HOST_ROOT/usr/local/bin/k3s"
+install -m 0755 "$PAYLOAD" "$HOST_ROOT/data/data/current/bin/k3s"
+ln -s /data/data/current/bin/k3s "$HOST_ROOT/usr/local/bin/linked-k3s"
+test "$("$PERMABOX_STATE_HELPER" validate-host-executable "$HOST_ROOT" /usr/local/bin/linked-k3s)" = /data/data/current/bin/k3s
+mv "$HOST_ROOT/data/data/current" "$HOST_ROOT/data/data/v1"
+ln -s /data/data/v1 "$HOST_ROOT/data/data/current"
+
+mkfifo "$state_dir/permabox"
+if reconcile 2>"$tmp/unsafe-installed-error"; then
+  printf '%s\n' 'accepted a non-regular installed runtime' >&2; exit 1
+fi
+grep -Fq 'validate installed permabox' "$tmp/unsafe-installed-error"
+test ! -e "$tmp/cri-queries"
+rm "$state_dir/permabox" "$state_dir/lock"
+
+(
+  install_host="$tmp/cache-test"
+  payload=$PAYLOAD
+  mkdir -p "$install_host"
+  stage="$tmp/cache-stage"
+  mkdir "$stage"
+  install -m 0755 "$PAYLOAD" "$stage/permabox"
+  install -m 0755 "$PAYLOAD" "$stage/runtime"
+  printf '{}\n' >"$stage/config.yaml"
+  digest=$(sha256sum "$stage/permabox" "$stage/config.yaml" | awk '{ print $1 }' | sha256sum)
+  version="$install_host/versions/${digest%% *}"
+  mkdir -p "$version"
+  install -m 0755 "$PAYLOAD" "$version/permabox"
+  printf '{}\n# changed\n' >"$version/config.yaml"
+  if publish_runtime "$stage" 2>"$tmp/unsafe-cache-error"; then
+    printf '%s\n' 'activated a mismatched cached generation' >&2; exit 1
+  fi
+  test ! -L "$install_host/current"
+  mv "$version" "$tmp/cached-version"
+  ln -s "$tmp/cached-version" "$version"
+  if publish_runtime "$stage" 2>"$tmp/linked-cache-error"; then
+    printf '%s\n' 'activated a linked cached generation' >&2; exit 1
+  fi
+  test ! -L "$install_host/current"
+  rm "$version"
+  mv "$tmp/cached-version" "$version"
+  cp "$stage/config.yaml" "$version/config.yaml"
+  umask 000
+  publish_runtime "$stage"
+  umask 077
+  test "$(readlink "$install_host/current")" = "versions/${digest%% *}"
+  test "$(stat -c %a "$version")" = 700
+)
+ln -s "$tmp/original" "$state_dir/lock"
+if reconcile 2>"$tmp/unsafe-lock-error"; then
+  printf '%s\n' 'accepted a symlinked installer lock' >&2; exit 1
+fi
+grep -Fq 'unsafe installer lock' "$tmp/unsafe-lock-error"
+cmp "$tmp/original" "$templates/config-v3.toml.tmpl"
+test ! -e "$tmp/cri-queries"
+rm "$state_dir/lock"
+
 if [[ ${1:-all} == all || $1 == bridge ]]; then
   if reject_bridge=1 BRIDGE_TIMEOUT=1 reconcile 2>/dev/null; then
     printf '%s\n' 'activated the runtime without an authenticated bridge' >&2; exit 1
@@ -116,6 +222,15 @@ test ! -e "$READY_FILE"
 test ! -e "$tmp/restarts"
 cmp "$tmp/original" "$templates/config-v3.toml.tmpl"
 chmod 0755 "$HOST_ROOT/opt/permabox-k3s"
+bridge_state="$HOST_ROOT/opt/permabox-k3s-bridge"
+test "$(stat -c %a "$bridge_state")" = 700
+printf '%s\n' 'other/release' >"$bridge_state/owner"
+if (install_dir=/opt/permabox-k3s-bridge; bridge_main) 2>"$tmp/bridge-owner-error"; then
+  printf '%s\n' 'bridge accepted another release owner' >&2; exit 1
+fi
+grep -Fq 'runtime is owned by another Helm release' "$tmp/bridge-owner-error"
+test "$(stat -c %a "$state_dir")" = 755
+rm "$bridge_state/owner"
 socket_path="$HOST_ROOT/opt/permabox-k3s/workload.sock"
 "$PAYLOAD" serve-workloads "$socket_path" &
 legacy_pid=$!
@@ -125,21 +240,29 @@ for ((i=0; i<100; i++)); do
 done
 test -f "$socket_path"
 legacy_socket=$(socket_identity "$socket_path")
-bridge_main &
-bridge_supervisor=$!
 if BRIDGE_TIMEOUT=1 reconcile 2>"$tmp/legacy-bridge-error"; then
-  printf '%s\n' 'accepted the old embedded bridge during lock migration' >&2; exit 1
+  printf '%s\n' 'accepted the old socket during bridge migration' >&2; exit 1
 fi
 grep -Fq 'authenticated readiness check' "$tmp/legacy-bridge-error"
-test "$(socket_identity "$socket_path")" = "$legacy_socket"
-kill "$legacy_pid"
-wait "$legacy_pid" || true
-legacy_pid=''
+(install_dir=/opt/permabox-k3s-bridge; bridge_main) &
+bridge_supervisor=$!
 for ((i=0; i<100; i++)); do
   if [[ -f $BRIDGE_READY_FILE ]]; then break; fi
   sleep 0.05
 done
 test -f "$BRIDGE_READY_FILE"
+(install_dir=/opt/permabox-k3s-bridge; bridge_probe)
+test "$(socket_identity "$socket_path")" = "$legacy_socket"
+kill "$legacy_pid"
+wait "$legacy_pid" || true
+legacy_pid=''
+marker="$bridge_state/workload.sock.ready"
+cp "$marker" "$tmp/bridge-marker"
+printf '\n' >>"$marker"
+if bridge_probe --node; then
+  printf '%s\n' 'accepted a bridge marker with trailing data' >&2; exit 1
+fi
+mv -T "$tmp/bridge-marker" "$marker"
 : >"$READY_FILE.events"
 reconcile
 if [[ ${1:-all} == all || $1 == bridge ]]; then
@@ -155,6 +278,7 @@ grep -Fq 'plugins."io.containerd.cri.v1.runtime"' "$templates/config-v3.toml.tmp
 test -x "$HOST_ROOT/opt/permabox-k3s/runtime"
 test -f "$READY_FILE"
 jq -e '.storage_root == "/var/lib/permabox/storage" and .underlying_runtime == "/data/data/current/bin/runc" and
+       .workload_socket == "/opt/permabox-k3s-bridge/workload.sock" and
        .storage_roots == {} and .underlying_runtimes == {} and .gc_idle_ttl == "0s"' \
   "$HOST_ROOT/opt/permabox-k3s/config.yaml" >/dev/null
 jq -e '.config.containerd.runtimes.permabox.PodAnnotations | sort ==
@@ -189,6 +313,7 @@ if [[ ${1:-all} == all || $1 == trust ]]; then
   if TRUSTED_NAMESPACES='"tenant-a"' reconcile 2>/dev/null; then exit 1; fi
 fi
 
+install -D -m 0755 "$PAYLOAD" "$HOST_ROOT/opt/runtime bin/runc"
 STORAGE_ROOTS='{"fast":"/srv/data # \"fast\""}' UNDERLYING_RUNTIMES='{"gpu":"/opt/runtime bin/runc"}' \
 GC_IDLE_TTL=48h GC_ON_WORKLOAD_DELETE=true GC_ON_SCALE_TO_ZERO=true GC_WORKLOAD_ANNOTATIONS=true reconcile
 jq -e '.storage_roots == {fast:"/srv/data # \"fast\""} and
@@ -205,6 +330,100 @@ reconcile
 jq -e 'has("trusted_namespaces") | not' "$HOST_ROOT/opt/permabox-k3s/config.yaml" >/dev/null
 test "$(wc -l <"$tmp/restarts")" -eq 1
 
+if [[ ${1:-all} == all || $1 == runtime ]]; then
+  runtime_generation=$(readlink "$state_dir/current")
+  install -D -m 0775 "$PAYLOAD" "$HOST_ROOT/opt/unsafe-runc"
+  if UNDERLYING_RUNTIME=/opt/unsafe-runc reconcile 2>"$tmp/runtime-error"; then
+    printf '%s\n' 'activated a writable default runtime' >&2; exit 1
+  fi
+  grep -Fq '/opt/unsafe-runc' "$tmp/runtime-error"
+  if UNDERLYING_RUNTIMES='{"gpu":"/opt/unsafe-runc"}' reconcile 2>"$tmp/runtime-error"; then
+    printf '%s\n' 'activated a writable runtime alias' >&2; exit 1
+  fi
+  grep -Fq 'runtime alias "gpu"' "$tmp/runtime-error"
+  ln -s /opt/permabox-k3s/runtime "$HOST_ROOT/opt/linked-wrapper"
+  if UNDERLYING_RUNTIME=/opt/linked-wrapper reconcile 2>"$tmp/runtime-error"; then
+    printf '%s\n' 'activated a runtime pointing to the wrapper' >&2; exit 1
+  fi
+  grep -Fq 'points to PermaBox' "$tmp/runtime-error"
+  mkdir -m 0700 "$HOST_ROOT/run/permabox"
+  sed "s|^base=.*|base=$state_dir|" "$state_dir/runtime" >"$tmp/admission-wrapper"
+  FIXTURE_RUNTIME=/opt/unsafe-runc sh "$tmp/admission-wrapper" create test-id &
+  create_pid=$!
+  for ((i=0; i<100; i++)); do
+    if [[ -f $READY_FILE.create ]]; then break; fi
+    sleep 0.05
+  done
+  test -f "$READY_FILE.create"
+  (
+    # Observe when reconciliation reaches the exclusive create gate.
+    # shellcheck disable=SC2317
+    flock() {
+      if [[ $1 == -x ]]; then touch "$tmp/waiting-for-create"; fi
+      command flock "$@"
+    }
+    reconcile
+  ) 2>"$tmp/runtime-error" &
+  install_pid=$!
+  for ((i=0; i<100; i++)); do
+    if [[ -e $tmp/waiting-for-create ]]; then break; fi
+    sleep 0.05
+  done
+  test -e "$tmp/waiting-for-create"
+  touch "$READY_FILE.release-create"
+  wait "$create_pid"
+  create_pid=''
+  if wait "$install_pid"; then
+    printf '%s\n' 'activated with an invalid runtime pinned by an in-flight create' >&2; exit 1
+  fi
+  grep -Fq 'pinned runtime for in-flight' "$tmp/runtime-error"
+  test "$(readlink "$state_dir/current")" = "$runtime_generation"
+  test ! -e "$state_dir/.transaction"
+  test ! -e "$READY_FILE"
+  test "$(wc -l <"$tmp/restarts")" -eq 1
+  chmod 0755 "$HOST_ROOT/opt/unsafe-runc"
+  reconcile
+  test -f "$READY_FILE"
+  rm "$READY_FILE.create" "$READY_FILE.release-create" "$HOST_ROOT/run/permabox/in-flight.runtime"
+  rmdir "$HOST_ROOT/run/permabox"
+fi
+
+if [[ ${1:-all} == all || $1 == bridge ]]; then
+  isolated_generation=$(readlink "$state_dir/current")
+  (
+    install_host=$state_dir payload=$PAYLOAD
+    stage=$(mktemp -d "$state_dir/.stage.XXXXXXXX")
+    cp "$state_dir/runtime" "$stage/runtime"
+    cp -L "$state_dir/permabox" "$stage/permabox"
+    jq 'del(.workload_socket)' "$state_dir/config.yaml" >"$stage/config.yaml"
+    publish_runtime "$stage"
+    rm -rf "$stage"
+  )
+  legacy_generation=$(readlink "$state_dir/current")
+  test "$legacy_generation" != "$isolated_generation"
+  mkdir -m 0700 "$HOST_ROOT/run/permabox"
+  printf '%s\n' '{"Runtime":"/data/data/current/bin/runc","Bundle":"/bundle"}' >"$HOST_ROOT/run/permabox/live.runtime"
+  if GC_IDLE_TTL=48h reconcile 2>"$tmp/migration-config-error"; then
+    printf '%s\n' 'allowed an unrelated configuration change during socket migration' >&2; exit 1
+  fi
+  grep -Fq 'stop PermaBox workloads before changing runtime settings' "$tmp/migration-config-error"
+  if expect_bridge_generation=$legacy_generation reconcile 2>"$tmp/migration-rollback-error"; then
+    printf '%s\n' 'committed the socket migration when the new bridge stopped responding' >&2; exit 1
+  fi
+  grep -Fq 'unavailable before commit' "$tmp/migration-rollback-error"
+  test "$(readlink "$state_dir/current")" = "$legacy_generation"
+  jq -e 'has("workload_socket") | not' "$state_dir/config.yaml" >/dev/null
+  test ! -e "$state_dir/.transaction"
+  test ! -e "$READY_FILE"
+  reconcile
+  test "$(readlink "$state_dir/current")" = "$isolated_generation"
+  test -f "$HOST_ROOT/run/permabox/live.runtime"
+  test -f "$READY_FILE"
+  test "$(wc -l <"$tmp/restarts")" -eq 1
+  rm "$HOST_ROOT/run/permabox/live.runtime"
+  rmdir "$HOST_ROOT/run/permabox"
+fi
+
 cp "$HOST_ROOT/opt/permabox-k3s/config.yaml" "$tmp/original-config"
 cp "$templates/config-v3.toml.tmpl" "$tmp/installed-template"
 if [[ ${1:-all} == all || $1 == bridge ]]; then
@@ -213,7 +432,7 @@ if [[ ${1:-all} == all || $1 == bridge ]]; then
   fi
   grep -Fq 'unavailable before commit' "$tmp/bridge-error"
   rm "$READY_FILE.deny"
-  bridge_probe
+  bridge_probe --node
   test ! -e "$READY_FILE"
   test ! -e "$HOST_ROOT/opt/permabox-k3s/.transaction"
   cmp "$tmp/original-config" "$HOST_ROOT/opt/permabox-k3s/config.yaml"
@@ -261,6 +480,36 @@ if [[ ${1:-all} == all || $1 == journal ]]; then
       PERSIST_ANNOTATION=example.test/persist interrupt_restart=1 reconcile
   ) 2>/dev/null; then exit 1; fi
   test -f "$HOST_ROOT/opt/permabox-k3s/.transaction/restart"
+  cp "$templates/config-v3.toml.tmpl" "$tmp/interrupted-template"
+  interrupted_generation=$(readlink "$state_dir/current")
+  previous_generation=$(readlink "$state_dir/.transaction/current")
+  cp "$state_dir/$previous_generation/config.yaml" "$tmp/previous-generation-config"
+  printf '\n# damaged cached configuration\n' >>"$state_dir/$previous_generation/config.yaml"
+  if reconcile 2>"$tmp/damaged-rollback"; then
+    printf '%s\n' 'recovered a damaged cached generation' >&2; exit 1
+  fi
+  grep -Fq 'does not match the expected digest' "$tmp/damaged-rollback"
+  cmp "$tmp/interrupted-template" "$templates/config-v3.toml.tmpl"
+  test "$(readlink "$state_dir/current")" = "$interrupted_generation"
+  test -f "$state_dir/.transaction/restart"
+  cp "$tmp/previous-generation-config" "$state_dir/$previous_generation/config.yaml"
+  if service_exe=/usr/local/bin/unrelated reconcile 2>"$tmp/unverified-rollback"; then
+    printf '%s\n' 'recovered a transaction for an unrelated service' >&2; exit 1
+  fi
+  grep -Fq 'unverified main process' "$tmp/unverified-rollback"
+  cmp "$tmp/interrupted-template" "$templates/config-v3.toml.tmpl"
+  test "$(readlink "$state_dir/current")" = "$interrupted_generation"
+  test -f "$state_dir/.transaction/restart"
+  mv "$templates" "$templates-real"
+  ln -s "$templates-real" "$templates"
+  if reconcile 2>"$tmp/linked-rollback"; then
+    printf '%s\n' 'recovered through a linked template directory' >&2; exit 1
+  fi
+  grep -Fq 'unsafe directory' "$tmp/linked-rollback"
+  cmp "$tmp/interrupted-template" "$templates-real/config-v3.toml.tmpl"
+  test -f "$state_dir/.transaction/restart"
+  rm "$templates"
+  mv "$templates-real" "$templates"
   if K3S_DATA_DIR=/other K3S_BIN=/other/k3s K3S_CRI_ENDPOINT=unix:///other.sock reconcile 2>/dev/null; then exit 1; fi
   test ! -e "$HOST_ROOT/opt/permabox-k3s/.transaction"
   test "$(tail -n 2 "$tmp/cri-queries" | sort -u)" = 'unix:///original.sock /original/k3s /data'
@@ -323,7 +572,7 @@ reconcile
 cmp "$tmp/original" "$templates/config-v3.toml.tmpl"
 test -f "$HOST_ROOT/var/lib/permabox/storage/default/demo-0/upper/keep"
 test ! -e "$HOST_ROOT/opt/permabox-k3s/runtime"
-bridge_probe
+bridge_probe --node
 test "$(wc -l <"$tmp/restarts")" -eq "$((restarts_before + 2))"
 reconcile
 test "$(wc -l <"$tmp/restarts")" -eq "$((restarts_before + 2))"
@@ -417,6 +666,7 @@ if [[ ${1:-all} == all || $1 == gate ]]; then
   test -f "$READY_FILE.delete"
   touch "$READY_FILE.release-create"
   wait "$create_pid" "$remove_pid"
+  create_pid=''
   test ! -e "$tmp/removal-succeeded"
   test -e "$HOST_ROOT/opt/permabox-k3s/create-closed"
   test -x "$HOST_ROOT/opt/permabox-k3s/runtime"
@@ -426,7 +676,7 @@ if [[ ${1:-all} == all || $1 == gate ]]; then
   if MODE=remove fail_restart=1 reconcile 2>/dev/null; then exit 1; fi
   test -e "$HOST_ROOT/opt/permabox-k3s/create-closed"
   test -x "$HOST_ROOT/opt/permabox-k3s/runtime"
-  bridge_probe
+  bridge_probe --node
   reconcile
   test ! -e "$HOST_ROOT/opt/permabox-k3s/create-closed"
   MODE=remove reconcile

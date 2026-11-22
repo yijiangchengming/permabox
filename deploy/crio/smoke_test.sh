@@ -53,6 +53,8 @@ node_exec swapoff -a
 node_exec modprobe overlay
 node_exec modprobe br_netfilter
 node_exec sysctl -w net.ipv4.ip_forward=1 net.bridge.bridge-nf-call-iptables=1
+node_exec install -d -o root -g root -m 0755 /opt
+node_exec install -d -o root -g root -m 0700 /opt/permabox
 node_exec install -Dm0755 bin/permabox /usr/local/bin/permabox
 node_exec install -Dm0755 "$assets/kubelet" /usr/local/bin/kubelet
 node_exec install -Dm0755 "$bundle/bin/crio" /usr/local/bin/crio
@@ -77,7 +79,6 @@ monitor_path = "/usr/libexec/crio/conmon"
 monitor_path = "/usr/libexec/crio/conmon"
 EOF
 node_exec install -d -m0755 /etc/cni/net.d /etc/permabox
-node_exec install -d -m0700 /opt/permabox
 # This bridge serves only the disposable single-node cluster.
 node_exec tee /etc/cni/net.d/10-permabox.conflist >/dev/null <<'EOF'
 {

@@ -25,6 +25,12 @@ See [config.yaml](config.yaml) for the defaults. If the node's `runc` is elsewhe
 
 Set `trusted_namespaces: [permabox-demo]` in the installed config to run the example. The default empty list denies persistence; regular runtime passthrough still works. Only list namespaces whose Pod creators you trust with every writable layer in that namespace. StatefulSet UID verification does not isolate users who can create Pods in the same namespace. Set the allowlist explicitly when upgrading.
 
+For manual deployments with multiple runtime instances on one node, use a separate config file per instance and set `state_dir` to a unique, root-controlled absolute directory. The default is `/run/permabox`. Configure each instance's OCI wrapper and GC service to use the same config, and give each instance distinct storage roots. Drain and clean up existing containers before switching state directories. The K3s Helm installer uses the default state directory.
+
+PermaBox rejects unsupported OCI commands, unrecognized lifecycle flags, and unreadable or invalid create bundles before invoking the runtime. Check the runtime's OCI command compatibility before upgrading. The state directory must be private and owned by the runtime user. Use trusted ancestors and avoid symlinks in the state path.
+
+Use CRI-managed OCI bundles under trusted directories with no symbolic links in the path. The bundle directory and its regular `config.json` must be writable only by their trusted owners. The config is limited to 4 MiB. Keep the bundle configuration unchanged throughout `create`, since the underlying runtime reads it after PermaBox checks it.
+
 | Environment variable | Purpose |
 | --- | --- |
 | `PERMABOX_CONFIG` | Config file path; defaults to `/etc/permabox/config.yaml` |
@@ -35,6 +41,8 @@ Set `trusted_namespaces: [permabox-demo]` in the installed config to run the exa
 | `PERMABOX_GC_IDLE_TTL` | Overrides `gc_idle_ttl` |
 
 The runtime process on the host must inherit these variables. Setting them in a workload container's `env` has no effect. Prefer the node config file; OCI commands do not need extra PermaBox arguments.
+
+Use a regular node configuration file of at most 1 MiB. Keep the file, its parent directories, and any symbolic links to it under root control. The runtime and GC both require a private `state_dir` owned by the runtime user, with trusted ancestors and no symbolic links in the path.
 
 Define optional storage and runtime aliases in the node config. The values must be absolute host paths:
 
@@ -49,7 +57,15 @@ On the Pod, or under `spec.template.metadata.annotations` in a StatefulSet, set 
 
 For production, put each configured storage root on a bounded filesystem separate from the node OS and runtime data. PermaBox writes outside the runtime's snapshot storage. Use host-managed block and inode quotas where supported, monitor both limits, and verify enforcement on the target filesystem. A dedicated filesystem limits node-wide impact, while per-slot quotas also limit contention between workloads sharing it.
 
+Keep the default runtime and all runtime aliases on paths owned by root. Only root may write to the executable or change its path. PermaBox checks the target and the components of any symbolic links it follows. Keep the path protected during upgrades and replace the binary or version link atomically.
+
+Use root-controlled directories for each local storage root, namespace, and Pod slot. PermaBox rejects symlinks and group or other write access at those directories. Each slot's OverlayFS `work` directory must be private and owned by the runtime user. GC skips unsafe storage paths. Check existing paths and markers before upgrading, and drain any affected workloads before migrating a linked storage path.
+
+PermaBox checks the filesystem identity of a writable slot before creating a container, including when a bind mount exposes the same slot under a different path. It records the device and inode in new mount journals. Finish cleanup in the original mount namespace if a legacy journal from another namespace blocks creation. Keep storage distinct between runtime instances that use separate state directories. The `container.json` marker has a 24 MiB read and write limit to cover JSON escaping for names in a valid OCI config.
+
 ## 2. Register the containerd handler
+
+When a mount journal records the storage identity, PermaBox verifies it before committing ownership or marking the layer released. A mismatch retains the journal for investigation. GC protects the recorded directory even when it is visible through another path. Reclaim approval applies to the same storage directory and release marker. Final deletion checks the recorded device and inode and stops at mount boundaries. GC retains retired directories with older receipts that lack a device number for administrator review.
 
 Run `containerd --version` and identify the containerd instance and config file used by kubelet (usually `/etc/containerd/config.toml`). Back up the file, then merge the `permabox` table and its `options` subtable from the matching snippet. Keep the existing CRI, image, snapshotter, and default runtime settings, with a single top-level `version` key.
 
@@ -153,9 +169,11 @@ If verification fails, first run `kubectl -n permabox-demo describe pod permabox
 
 ## Periodic garbage collection
 
+GC reads directory entries in batches when deleting retired data. It checks the mount identity before descending into each directory.
+
 The default `gc_idle_ttl: "0s"` retains released data. Periodic GC still retries stale cleanup when it can confirm that doing so is safe. With a positive Go duration such as `"72h"`, the idle period starts when the writable layer was last confirmed released. After the period elapses, a subsequent eligible GC sweep can delete the data. Before expiry, a replacement on the same node with the same storage root, namespace, and Pod name can restore the layer. GC keeps legacy data without a lifecycle marker until a later successful use and release. It skips active, potentially mounted, or uncertain data and records. Shared storage is unsupported.
 
-Reclaiming data when a StatefulSet is deleted or scaled to zero is off by default. Deletion can reclaim a released layer on the next eligible sweep. Scale-to-zero requires a later sweep, at least one minute after the first approval. GC confirms each workload shortly before renaming its layers; an expired approval or a reused layer prevents that retirement. An upscale accepted between the final API check and the disk operation can still lose the released layer. To preserve data across scale-to-zero, leave `gc_on_scale_to_zero` disabled and avoid enabling it through workload annotations. Idle TTL is a separate policy. For manual deployment, the local metadata bridge is required even with both workload policies off. Set `workload_socket` to its absolute host path. Its ServiceAccount needs only `get` access to Pods and StatefulSets, and its socket directory must be private (`0700`). The [K3s Helm installer](k3s/README.md) sets it up automatically.
+Reclaiming data when a StatefulSet is deleted or scaled to zero is off by default. Deletion can reclaim a released layer on the next eligible sweep. Scale-to-zero requires a later sweep, at least one minute after the first approval. GC confirms each workload shortly before renaming its layers; an expired approval or a reused layer prevents that retirement. An upscale accepted between the final API check and the disk operation can still lose the released layer. To preserve data across scale-to-zero, leave `gc_on_scale_to_zero` disabled and avoid enabling it through workload annotations. Idle TTL is a separate policy. For manual deployment, the local metadata bridge is required even with both workload policies off. Set `workload_socket` to its absolute host path. Its ServiceAccount needs only `get` access to Pods and StatefulSets, and its socket directory must be owned by root with mode `0700` and no symlinks in its path. Run the bridge and runtime under the same effective UID. The client verifies the socket owner and server UID before using metadata. The [K3s Helm installer](k3s/README.md) sets it up automatically.
 
 After a node reboot, GC can release a layer whose latest start was confirmed if no journal or mount references it. Loss of the journal alone does not prove release. When the latest start was not confirmed, idle TTL can reclaim the layer only if its slot has no previous confirmed use, release was recorded, and `upper` is empty. GC keeps layers with data or uncertain provenance and retries interrupted deletions using a receipt outside the deleted directory.
 

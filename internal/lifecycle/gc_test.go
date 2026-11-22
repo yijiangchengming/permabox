@@ -9,12 +9,38 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/yijiangchengming/permabox/internal/mount"
 	"github.com/yijiangchengming/permabox/internal/ownership"
 )
+
+func TestWorkloadGCSkipsUnsafeCursorFiles(t *testing.T) {
+	for _, tc := range []struct {
+		name, file, data string
+		mode             os.FileMode
+	}{
+		{"writable lock", gcCursor + ".lock", "", 0666},
+		{"writable cursor", gcCursor, "", 0666},
+		{"oversized cursor", gcCursor, strings.Repeat(" ", 4097), 0600},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := privateStateDir(t)
+			path := filepath.Join(dir, tc.file)
+			if err := os.WriteFile(path, []byte(tc.data), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(path, tc.mode); err != nil {
+				t.Fatal(err)
+			}
+			if err := checkWorkloadBatch(dir, nil, gcLimits{}, nil, nil); err == nil {
+				t.Fatal("accepted an unsafe GC cursor or lock")
+			}
+		})
+	}
+}
 
 func TestSweepWorkloadsRechecksEligibilityBeforeRetirement(t *testing.T) {
 	base := privateStateDir(t)

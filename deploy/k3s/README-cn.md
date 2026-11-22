@@ -17,7 +17,7 @@ IMAGE_REPO=ghcr.io/yijiangchengming/permabox-installer
 IMAGE_TAG='<MAJOR.MINOR.PATCH>'
 ```
 
-如果发布镜像尚不可用，或需要部署自定义构建，请从项目根目录构建并推送到集群可拉取的镜像仓库。安装器镜像应包含 Pod 别名、`gc` 和 `validate-config` 支持。无需在 K3s 节点上构建或复制文件：
+如果发布镜像尚不可用，或需要部署自定义构建，请从与 Chart 相同的版本构建安装器镜像，并推送到集群可访问的仓库。在项目根目录运行以下命令，K3s 节点会直接拉取镜像：
 
 ```sh
 IMAGE_REPO=registry.example.com/infra/permabox-installer
@@ -69,13 +69,23 @@ Chart 将同一套 `nodeSelector` 和 `tolerations` 应用于安装器和 Runtim
 | `gcIntervalSeconds` | `60`；每次 GC 前等待的秒数（正整数） |
 | `persistAnnotation` | `permabox.io/persist`；更改后须同步修改业务 Pod |
 
-在 Pod 上用 `permabox.io/storage-root` 为选中的持久化容器指定存储别名。命名空间列入 `trustedNamespaces` 的 Pod 可以用 `permabox.io/underlying-runtime` 为业务容器指定运行时别名。sandbox 使用创建时的默认运行时。参见[别名配置](../README-cn.md#1-安装到目标节点)。升级时请使用新的发布镜像标签，或用新标签推送自定义构建。仍存在容器记录时，安装器允许单独修改工作负载回收开关，修改其他运行时配置前请先停止 PermaBox 工作负载。
+在 Pod 上用 `permabox.io/storage-root` 为选中的持久化容器指定存储别名。命名空间列入 `trustedNamespaces` 的 Pod 可以用 `permabox.io/underlying-runtime` 为业务容器指定运行时别名。sandbox 使用创建时的默认运行时。参见[别名配置](../README-cn.md#1-安装到目标节点)。升级时请使用新的发布镜像标签，或用新标签推送自定义构建。仍有容器记录时，安装器允许调整工作负载回收开关，以及将旧默认套接字迁移到 Bridge 专用目录。修改其他运行时配置前，请先停止 PermaBox 工作负载。
 
-安装器通过 `permabox validate-config` 验证暂存的配置，验证成功后才发布。默认运行时和别名均不得指向安装器包装器 `/opt/permabox-k3s/runtime`，否则会递归调用 PermaBox。
+发布运行时版本前，安装器会验证暂存配置，并获取创建准入锁。它使用 OCI 分发的同一套路径和可执行文件检查，验证默认运行时、每个配置的别名，以及 `/run/permabox` 中每条容器路由固定的运行时。K3s 的 `data/current` 链接仍可使用，前提是链接路径和目标均由 root 控制。解析到 PermaBox 包装器或二进制的路径会被拒绝。升级前，请在每个选定节点检查自定义运行时和存储路径。存储根目录及其中的命名空间和写层目录须为普通目录，且只有 root 可以写入。
+
+安装器在每次查询 CRI 前检查宿主机上的 K3s 可执行文件，回滚时也会执行这项检查。受信的符号链接按宿主机根路径解析。复用缓存版本前，安装器会验证目录、二进制和配置，并核对内容与暂存摘要是否一致。校验失败会中止启用。
 
 安装器会先确认元数据桥接可用，并检查现有写层是否有可核验的 StatefulSet 身份，再发布升级。若发现旧写层问题，请处理后重试。CRI handler 切换失败时会恢复事务记录的原状态；请预留时间让 K3s 重启并恢复原 handler。
 
-元数据桥接由独立的 DaemonSet 运行。安装器 Pod 替换或主机端事务回滚时，桥接仍可用。迁移时沿用原 socket，新桥接会等待旧进程释放锁。若原包装器没有创建准入锁，请停止所有 PermaBox Pod，并阻止控制器创建替代 Pod。以安装模式设置 `--set allowLegacyWrapperMigration=true`，确认升级就绪后再恢复业务或切换到卸载模式。新准入锁无法跟踪迁移前已启动的创建操作。承载 PermaBox 工作负载的节点不应通过 Helm 回退到会移除独立桥接的旧 Chart。默认共用镜像时，镜像故障可能同时影响两个 DaemonSet，滚动替换桥接也可能短暂阻塞新建持久化容器。可独立固定 `bridgeImage`，避免常规安装器镜像升级重启桥接。
+请让 root 控制 `/opt/permabox-k3s` 及其上级目录。安装器在加锁或恢复事务前会检查状态目录和已有锁文件。受信的旧版目录会收紧为 `0700`。其他用户可写的目录、不安全的锁文件和指向事务目录的符号链接会被拒绝。
+
+元数据 Bridge DaemonSet 只挂载宿主机的 `/opt/permabox-k3s-bridge`。Bridge 和安装器都会检查该目录由 root 所有，并将权限设为 `0700`，因此两套 DaemonSet 可以按任意顺序滚动更新。安装器将 `workload_socket` 设为 `/opt/permabox-k3s-bridge/workload.sock`。请使用配套的 Chart 和安装器镜像一起升级。Bridge 沿用容器内的挂载路径，因此常规更新安装器时可以继续固定兼容的 `bridgeImage`。
+
+从 `/opt/permabox-k3s/workload.sock` 迁移时，Bridge 可能先于安装器切换路径。受影响节点上的新持久化容器创建和基于工作负载的 GC 可能暂时暂停。宿主机事务失败时，安装器会恢复旧版运行时及套接字路径。若旧 Bridge 已退出，请解决启用失败的原因，待安装器通过专用 Bridge 重试成功后恢复上述操作。通过 Helm 跨此次套接字变更降级前，请先排空 PermaBox 工作负载，并搭配使用旧 Chart 和对应的安装器镜像。
+
+若原包装器没有创建准入锁，请停止所有 PermaBox Pod，并阻止控制器创建替代 Pod。以安装模式设置 `--set allowLegacyWrapperMigration=true`，确认升级就绪后再恢复业务或切换到卸载模式。新准入锁只能跟踪升级后通过包装器发起的创建操作。承载 PermaBox 工作负载的节点应使用带独立 Bridge DaemonSet 的 Chart。
+
+回滚时，安装器会在恢复节点文件前核对事务记录中的 K3s 服务，并验证旧版本链接指向的缓存。主进程身份不符、缓存缺失或校验失败时，安装器会保留待处理事务。已停止的 K3s 服务仍可恢复。正常协调和回滚均通过宿主机 PID 1 的根目录访问 containerd 配置目录。该目录及其中的普通配置和模板文件须由 root 控制，且路径不能包含符号链接。
 
 两项工作负载回收策略仅适用于 StatefulSet，可独立开启，例如 Helm 的 `--set gcOnWorkloadDelete=true --set gcOnScaleToZero=true`。已释放的写层由下一轮周期任务检查，默认间隔 60 秒，可通过 `gcIntervalSeconds` 调整。两项策略都无需等待 `gcIdleTTL`。即使关闭回收，Helm 也会启动只读元数据桥接以核验 StatefulSet UID。升级前请参考[旧写层迁移说明](../README-cn.md)。
 

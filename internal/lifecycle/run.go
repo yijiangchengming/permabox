@@ -5,7 +5,6 @@ package lifecycle
 import (
 	"context"
 	"errors"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -25,10 +24,13 @@ func Run(cfg config.Config, manager mount.Manager, args []string, report func(st
 	if len(args) == 1 && args[0] == "gc" {
 		return collect(cfg, manager, routing, report)
 	}
-	inv := oci.Parse(args)
+	inv, err := oci.Parse(args)
+	if err != nil {
+		report("%v", err)
+		return 1
+	}
 	runtime := cfg.Runtime
 	var pinned route
-	var err error
 	if inv.ID != "" {
 		pinned, err = routing.lookup(inv.ID)
 		if err != nil {
@@ -39,18 +41,16 @@ func Run(cfg config.Config, manager mount.Manager, args []string, report func(st
 			runtime = pinned.Runtime
 		}
 	}
-	var installed, pinnedNow, validated bool
+	var installed, pinnedNow bool
+	var executable string
 	switch inv.Command {
 	case "create":
 		options, err := oci.InspectBundle(inv.Bundle, cfg.Annotation)
 		if err != nil {
 			report("create %s: inspect bundle: %v", inv.ID, err)
-			// Leave runtime-specific diagnostics and exit codes to the runtime
-			// when its OCI config could not be read or decoded.
-			if oci.IsInvalidPersistence(err) {
-				return 1
-			}
-		} else {
+			return 1
+		}
+		{
 			if bundle := options.Persistence; bundle != nil && !cfg.TrustsNamespace(bundle.Namespace) {
 				report("create %s: namespace %q is not trusted for persistence; check trusted_namespaces", inv.ID, bundle.Namespace)
 				return 1
@@ -76,11 +76,11 @@ func Run(cfg config.Config, manager mount.Manager, args []string, report func(st
 					return 1
 				}
 			}
-			if err := checkRuntime(runtime); err != nil {
+			executable, err = checkRuntime(runtime)
+			if err != nil {
 				report("%v", err)
 				return 1
 			}
-			validated = true
 			pinnedNow, err = routing.pin(inv.ID, runtime, inv.Bundle)
 			if err != nil {
 				report("create %s: pin runtime: %v", inv.ID, err)
@@ -117,11 +117,12 @@ func Run(cfg config.Config, manager mount.Manager, args []string, report func(st
 			return 1
 		}
 		if managed || pinned.Runtime != "" {
-			if err := checkRuntime(runtime); err != nil {
+			executable, err := checkRuntime(runtime)
+			if err != nil {
 				report("%v", err)
 				return 1
 			}
-			if code := runRuntime(runtime, args, inv, report); code != 0 {
+			if code := runRuntime(runtime, executable, args, inv, report); code != 0 {
 				return code
 			}
 			if managed {
@@ -139,8 +140,9 @@ func Run(cfg config.Config, manager mount.Manager, args []string, report func(st
 			return 0
 		}
 	}
-	if !validated {
-		if err := checkRuntime(runtime); err != nil {
+	if executable == "" {
+		executable, err = checkRuntime(runtime)
+		if err != nil {
 			report("%v", err)
 			return 1
 		}
@@ -152,7 +154,7 @@ func Run(cfg config.Config, manager mount.Manager, args []string, report func(st
 			return 1
 		}
 		if managed {
-			if code := runRuntime(runtime, args, inv, report); code != 0 {
+			if code := runRuntime(runtime, executable, args, inv, report); code != 0 {
 				return code
 			}
 			if err := manager.ActivateOwnership(inv.ID); err != nil {
@@ -162,7 +164,7 @@ func Run(cfg config.Config, manager mount.Manager, args []string, report func(st
 		}
 	}
 	argv := append([]string{runtime}, args...)
-	if err := syscall.Exec(runtime, argv, os.Environ()); err != nil {
+	if err := syscall.Exec(executable, argv, os.Environ()); err != nil {
 		report("exec %s: %v", runtime, err)
 		if installed {
 			if err := manager.Cleanup(inv.ID); err != nil {
@@ -180,8 +182,9 @@ func Run(cfg config.Config, manager mount.Manager, args []string, report func(st
 	return 0
 }
 
-func runRuntime(runtime string, args []string, inv oci.Invocation, report func(string, ...any)) int {
+func runRuntime(runtime, executable string, args []string, inv oci.Invocation, report func(string, ...any)) int {
 	cmd := exec.Command(runtime, args...)
+	cmd.Path = executable
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	if err := cmd.Run(); err != nil {
 		if status, ok := err.(*exec.ExitError); ok {
@@ -239,22 +242,4 @@ func workloadClient(cfg config.Config) workload.Client {
 		path = workload.DefaultSocket
 	}
 	return workload.UnixClient(path)
-}
-
-func checkRuntime(path string) error {
-	target, err := os.Stat(path)
-	if err != nil {
-		return err
-	}
-	if !target.Mode().IsRegular() || target.Mode().Perm()&0111 == 0 {
-		return fmt.Errorf("underlying runtime %s is not an executable file", path)
-	}
-	self, err := os.Stat("/proc/self/exe")
-	if err != nil {
-		return err
-	}
-	if os.SameFile(target, self) {
-		return fmt.Errorf("underlying runtime %s points to PermaBox", path)
-	}
-	return nil
 }

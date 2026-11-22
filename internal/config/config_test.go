@@ -59,6 +59,46 @@ func TestLoadOverridesAndDefaults(t *testing.T) {
 	}
 }
 
+func TestLoadRequiresTrustedConfig(t *testing.T) {
+	dir := t.TempDir()
+	version := filepath.Join(dir, "versions", "release")
+	if err := os.MkdirAll(version, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(version, "config.yaml")
+	if err := os.WriteFile(path, []byte("trusted_namespaces: [team]\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("versions/release", filepath.Join(dir, "current")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PERMABOX_CONFIG", filepath.Join(dir, "current", "config.yaml"))
+	if cfg, err := Load(); err != nil || !cfg.TrustsNamespace("team") {
+		t.Fatalf("load from trusted version link: %+v, %v", cfg, err)
+	}
+	for _, component := range []string{path, version} {
+		t.Run(filepath.Base(component), func(t *testing.T) {
+			info, err := os.Stat(component)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.Chmod(component, info.Mode()) })
+			if err := os.Chmod(component, info.Mode()|0022); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Load(); err == nil {
+				t.Error("loaded a config through a writable component")
+			}
+		})
+	}
+	if err := os.WriteFile(path, []byte("trusted_namespaces: [team]\n#"+strings.Repeat(" ", 1<<20)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(); err == nil {
+		t.Error("loaded an oversized config")
+	}
+}
+
 func TestLoadNamedOptions(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	t.Setenv("PERMABOX_CONFIG", path)
