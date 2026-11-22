@@ -126,7 +126,7 @@ func resolveFile(root, path string) (string, os.FileInfo, error) {
 			return next, info, nil
 		}
 		if !trustedDir(info) {
-			return "", nil, fmt.Errorf("%w component %s", ErrUnsafeDir, next)
+			return "", nil, fmt.Errorf("%w component %s (uid %d, mode %04o)", ErrUnsafeDir, next, ownerUID(info), info.Mode().Perm())
 		}
 		resolved = next
 	}
