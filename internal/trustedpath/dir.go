@@ -76,7 +76,7 @@ func OpenChild(parent *os.File, name string, create, private bool) (*os.File, er
 	}
 	if !trustedDir(info) || (private && (ownerUID(info) != os.Geteuid() || info.Mode().Perm()&0077 != 0)) {
 		dir.Close()
-		return nil, fmt.Errorf("%w component %s", ErrUnsafeDir, path)
+		return nil, fmt.Errorf("%w component %s (uid %d, mode %04o)", ErrUnsafeDir, path, ownerUID(info), info.Mode().Perm())
 	}
 	return dir, nil
 }
