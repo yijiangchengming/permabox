@@ -3,8 +3,55 @@ package oci
 import (
 	"os"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"testing"
 )
+
+func TestInspectBundleRejectsUnsafeConfig(t *testing.T) {
+	bundle := t.TempDir()
+	path := filepath.Join(bundle, "config.json")
+	target := filepath.Join(bundle, "target")
+	if err := os.WriteFile(target, []byte("{}"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InspectBundle(bundle, "permabox.io/persist"); err == nil {
+		t.Fatal("accepted a symlink")
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("{}"+strings.Repeat(" ", 4<<20)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InspectBundle(bundle, "permabox.io/persist"); err == nil {
+		t.Fatal("accepted oversized configuration")
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(path, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InspectBundle(bundle, "permabox.io/persist"); err == nil {
+		t.Fatal("accepted a FIFO")
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("{}"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(bundle, 0777); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InspectBundle(bundle, "permabox.io/persist"); err == nil {
+		t.Fatal("accepted a bundle in a writable directory")
+	}
+}
 
 func TestInvocation(t *testing.T) {
 	for _, test := range []struct {
@@ -21,8 +68,9 @@ func TestInvocation(t *testing.T) {
 		{[]string{"create", "--help", "id"}, Invocation{}},
 		{[]string{"create", "--bundle"}, Invocation{}},
 	} {
-		if got := Parse(test.args); got != test.want {
-			t.Errorf("Parse(%q) = %+v; want %+v", test.args, got, test.want)
+		got, err := Parse(test.args)
+		if got != test.want || (err != nil) != (test.want == (Invocation{})) {
+			t.Errorf("Parse(%q) = %+v, %v; want %+v", test.args, got, err, test.want)
 		}
 	}
 }

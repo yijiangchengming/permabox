@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -94,6 +95,35 @@ func TestFailedCreatePreservesOwner(t *testing.T) {
 	if err != nil || len(candidates) != 0 {
 		t.Fatalf("discover after failed create = %+v, %v", candidates, err)
 	}
+}
+
+func TestRetirementApprovalRejectsReplacedDirectory(t *testing.T) {
+	m, _, _, slot := fixture(t)
+	now := time.Now()
+	roots := []string{filepath.Dir(filepath.Dir(slot))}
+	prepareReleasedSlot(t, slot, now)
+	owner := ownership.Owner{Namespace: "namespace", Kind: "StatefulSet", Name: "app", UID: "app-uid"}
+	if err := writeRecord(filepath.Join(slot, workloadMarker), owner); err != nil {
+		t.Fatal(err)
+	}
+	approved, err := m.DiscoverReleased(roots, "", 0, now)
+	if err != nil || len(approved) != 1 {
+		t.Fatalf("discover = %v, %v", approved, err)
+	}
+	old := slot + "-old"
+	if err := os.Rename(slot, old); err != nil {
+		t.Fatal(err)
+	}
+	prepareReleasedSlot(t, slot, now)
+	for _, name := range []string{workloadMarker, releasedMarker} {
+		if err := os.Rename(filepath.Join(old, name), filepath.Join(slot, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := m.RetireReleased(roots, "", now, approved); err != nil {
+		t.Fatal(err)
+	}
+	check(t, filepath.Join(slot, "upper"), "payload", "keep")
 }
 
 func TestIdleTTLReclaimsOnlyEmptyReleasedFirstUseWithoutConfirmation(t *testing.T) {
@@ -272,6 +302,9 @@ func TestSweepResumesPartiallyDeletedRetirement(t *testing.T) {
 		if err := os.Remove(filepath.Join(parked, marker)); err != nil {
 			t.Fatal(err)
 		}
+	}
+	for i := 0; i < 300; i++ {
+		put(t, filepath.Join(parked, "upper"), strconv.Itoa(i), "data")
 	}
 	unknown := filepath.Join(filepath.Dir(slot), retiredPrefix+"unknown")
 	mkdir(t, unknown)
@@ -488,6 +521,96 @@ func TestSweepReleasedSlotsAfterReboot(t *testing.T) {
 	assertMissing(t, slot)
 	if info, err := os.Stat(m.Dir); err != nil || info.Mode().Perm() != 0700 {
 		t.Fatalf("missing private state directory: %v, %v", info, err)
+	}
+}
+
+func TestSweepRejectsWritableStateAncestor(t *testing.T) {
+	m, _, _, slot := fixture(t)
+	parent := filepath.Join(filepath.Dir(m.Dir), "shared")
+	mkdir(t, parent)
+	if err := os.Chmod(parent, 0777); err != nil {
+		t.Fatal(err)
+	}
+	m.Dir = filepath.Join(parent, "state")
+	if err := m.Sweep([]string{filepath.Dir(filepath.Dir(slot))}, 0, time.Now()); err == nil {
+		t.Fatal("swept with an untrusted state path")
+	}
+	assertMissing(t, m.Dir)
+}
+
+func TestSweepPreservesWritableStorageSlot(t *testing.T) {
+	m, _, _, slot := fixture(t)
+	now := time.Now()
+	prepareReleasedSlot(t, slot, now.Add(-2*time.Hour))
+	if err := os.Chmod(slot, 0777); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Sweep([]string{filepath.Dir(filepath.Dir(slot))}, time.Hour, now); err != nil {
+		t.Fatal(err)
+	}
+	check(t, filepath.Join(slot, "upper"), "payload", "keep")
+}
+
+func TestSweepProtectsSlotByRecordedIdentity(t *testing.T) {
+	m, _, root, slot := fixture(t)
+	now := time.Now()
+	prepareReleasedSlot(t, slot, now.Add(-2*time.Hour))
+	info, err := os.Stat(slot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stat := info.Sys().(*syscall.Stat_t)
+	mkdir(t, m.Dir)
+	state := record{
+		Namespace: "mnt:[2]", Root: root, Slot: slot + "-other-path",
+		SlotIdentity: &slotIdentity{Device: uint64(stat.Dev), Inode: stat.Ino},
+	}
+	if err := writeRecord(m.journal("live"), state); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Sweep([]string{filepath.Dir(filepath.Dir(slot))}, time.Hour, now); err != nil {
+		t.Fatal(err)
+	}
+	check(t, filepath.Join(slot, "upper"), "payload", "keep")
+}
+
+func TestPreparePreservesUnsafeUseMarker(t *testing.T) {
+	m, _, root, slot := fixture(t)
+	owner := ownership.Owner{Namespace: "namespace", Kind: "StatefulSet", Name: "app", UID: "app-uid"}
+	if _, err := m.PrepareOwned("first", root, slot, "app", owner); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Cleanup("first"); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(slot, useMarker)
+	if err := os.Chmod(marker, 0666); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.PrepareOwned("replacement", root, slot, "app", owner); err == nil {
+		t.Fatal("accepted a writable use marker")
+	}
+	if info, err := os.Stat(marker); err != nil || info.Mode().Perm() != 0666 {
+		t.Fatalf("use marker changed: %v, %v", info, err)
+	}
+}
+
+func TestSweepPreservesUnsafeOrphanReceipt(t *testing.T) {
+	m, _, _, slot := fixture(t)
+	parent := filepath.Dir(slot)
+	mkdir(t, parent)
+	receipt := filepath.Join(parent, retiredPrefix+"orphan"+receiptSuffix)
+	if err := writeRecord(receipt, retirementReceipt{Inode: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(receipt, 0666); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Sweep([]string{filepath.Dir(parent)}, 0, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(receipt); err != nil {
+		t.Fatalf("orphan receipt changed: %v", err)
 	}
 }
 

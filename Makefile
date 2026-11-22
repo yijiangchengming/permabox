@@ -26,6 +26,7 @@ lint-installer:
 lint-chart:
 	$(HELM) lint --strict deploy/helm/permabox --set-string image.repository=example.invalid/permabox-installer --set-string 'nodeSelector.kubernetes\.io/hostname=test-node'
 	$(HELM) lint --strict deploy/helm/permabox --set-string image.repository=example.invalid/permabox-installer --set-string 'nodeSelector.kubernetes\.io/hostname=test-node' --set gcWorkloadAnnotations=true
+	HELM="$(HELM)" bash deploy/k3s/installer_test.sh chart
 
 test-kernel:
 	@go_bin=$$(command -v $(GO)) || exit; \

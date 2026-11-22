@@ -4,10 +4,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
+
+	"github.com/yijiangchengming/permabox/internal/trustedpath"
 )
 
 type Invocation struct {
@@ -15,7 +19,7 @@ type Invocation struct {
 }
 
 // Flag tables describe the runc-compatible CLI; the original argv is never
-// rewritten. Unrecognized forms remain the underlying runtime's responsibility.
+// rewritten. Unsupported forms are rejected before runtime dispatch.
 var globalValue = set("--log", "--log-format", "--root", "--criu", "--rootless")
 var globalBool = set("--debug", "--systemd-cgroup")
 var createValue = set("--bundle", "-b", "--console-socket", "--pidfd-socket", "--pid-file", "--preserve-fds")
@@ -43,21 +47,24 @@ func ValidID(id string) bool {
 	return idPattern.MatchString(id) && id != "." && id != ".."
 }
 
-func Parse(args []string) Invocation {
+func Parse(args []string) (Invocation, error) {
 	commandAt := 0
 	for commandAt < len(args) && strings.HasPrefix(args[commandAt], "-") {
 		if args[commandAt] == "--" {
 			commandAt++
 			break
 		}
+		if commandAt == len(args)-1 && (args[commandAt] == "--help" || args[commandAt] == "-h" || args[commandAt] == "--version" || args[commandAt] == "-v") {
+			return Invocation{}, nil
+		}
 		end, _, _, ok := flag(args, commandAt, globalValue, globalBool)
 		if !ok {
-			return Invocation{}
+			return Invocation{}, fmt.Errorf("unsupported OCI global option %q", args[commandAt])
 		}
 		commandAt = end
 	}
 	if commandAt >= len(args) {
-		return Invocation{}
+		return Invocation{}, nil
 	}
 	inv := Invocation{Command: args[commandAt]}
 	var values, switches map[string]bool
@@ -80,8 +87,10 @@ func Parse(args []string) Invocation {
 		values, switches = set("--interval"), set("--stats")
 	case "checkpoint":
 		values, switches = checkpointValue, checkpointBool
+	case "list", "features", "help", "spec":
+		return Invocation{}, nil
 	default:
-		return Invocation{}
+		return Invocation{}, fmt.Errorf("unsupported OCI command %q", inv.Command)
 	}
 	i := commandAt + 1
 	for i < len(args) && strings.HasPrefix(args[i], "-") {
@@ -91,21 +100,24 @@ func Parse(args []string) Invocation {
 		}
 		end, name, value, ok := flag(args, i, values, switches)
 		if !ok {
-			return Invocation{}
+			return Invocation{}, fmt.Errorf("%s: unsupported or incomplete OCI option %q", inv.Command, args[i])
 		}
-		if (name == "--bundle" || name == "-b") && value != "" {
+		if name == "--bundle" || name == "-b" {
+			if value == "" {
+				return Invocation{}, errors.New("create: empty OCI bundle path")
+			}
 			inv.Bundle = value
 		}
 		i = end
 	}
 	if i >= len(args) || !ValidID(args[i]) {
-		return Invocation{}
+		return Invocation{}, fmt.Errorf("%s: missing or invalid container ID", inv.Command)
 	}
 	if (inv.Command == "kill" && i+2 < len(args)) || (inv.Command != "exec" && inv.Command != "kill" && inv.Command != "ps" && i+1 != len(args)) {
-		return Invocation{}
+		return Invocation{}, fmt.Errorf("%s: unexpected OCI arguments after container ID", inv.Command)
 	}
 	inv.ID = args[i]
-	return inv
+	return inv, nil
 }
 
 func flag(args []string, i int, values, switches map[string]bool) (int, string, string, bool) {
@@ -147,7 +159,7 @@ func IsInvalidPersistence(err error) bool {
 
 func InspectBundle(bundle, annotation string) (BundleOptions, error) {
 	var options BundleOptions
-	data, err := os.ReadFile(filepath.Join(bundle, "config.json"))
+	data, err := readBundleConfig(bundle)
 	if err != nil {
 		return options, err
 	}
@@ -203,6 +215,52 @@ func InspectBundle(bundle, annotation string) (BundleOptions, error) {
 	options.Persistence = &Bundle{root, ns, pod, name, uid}
 	options.StorageAlias = a[StorageRootAnnotation]
 	return options, nil
+}
+
+const MaxBundleConfigSize = 4 << 20
+
+func readBundleConfig(bundle string) ([]byte, error) {
+	if filepath.Clean(bundle) != bundle {
+		return nil, errors.New("OCI bundle path must be clean")
+	}
+	path, err := filepath.Abs(bundle)
+	if err != nil {
+		return nil, err
+	}
+	dir, err := trustedpath.OpenDir(path, false, false)
+	if err != nil {
+		return nil, err
+	}
+	defer dir.Close()
+	dirInfo, err := dir.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if dirInfo.Mode().Perm()&0022 != 0 {
+		return nil, errors.New("OCI bundle directory must be writable only by its trusted owner")
+	}
+	fd, err := syscall.Openat(int(dir.Fd()), "config.json", syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, fmt.Errorf("open OCI config: %w", err)
+	}
+	file := os.NewFile(uintptr(fd), "config.json")
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	uid := int(info.Sys().(*syscall.Stat_t).Uid)
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0022 != 0 || (uid != 0 && uid != os.Geteuid()) {
+		return nil, errors.New("OCI config must be a regular file writable only by its trusted owner")
+	}
+	data, err := io.ReadAll(io.LimitReader(file, MaxBundleConfigSize+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > MaxBundleConfigSize {
+		return nil, errors.New("OCI config exceeds 4 MiB")
+	}
+	return data, nil
 }
 
 func isCRIOVFSRoot(root string) bool {

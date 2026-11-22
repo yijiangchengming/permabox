@@ -15,6 +15,53 @@ import (
 )
 
 func main() {
+	if len(os.Args) == 3 && os.Args[1] == "validate-containerd-directory" {
+		if err := validateContainerdDirectory(os.Args[2]); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+	if len(os.Args) == 3 && os.Args[1] == "validate-installed-runtime" {
+		if err := validateInstalledRuntime(os.Args[2]); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+	if len(os.Args) == 4 {
+		switch os.Args[1] {
+		case "prepare-bridge-state":
+			if err := prepareBridgeState(os.Args[2], os.Args[3]); err != nil {
+				log.Fatal(err)
+			}
+			return
+		case "check-bridge-marker":
+			if err := checkBridgeMarker(os.Args[2], os.Args[3]); err != nil {
+				os.Exit(1)
+			}
+			return
+		case "validate-host-executable":
+			if err := printHostExecutable(os.Args[2], os.Args[3]); err != nil {
+				log.Fatal(err)
+			}
+			return
+		case "validate-host-runtimes":
+			if err := validateHostRuntimes(os.Args[2], os.Args[3]); err != nil {
+				log.Fatal(err)
+			}
+			return
+		case "prepare-runtime-cache", "verify-runtime-cache":
+			if err := verifyRuntimeCache(os.Args[2], os.Args[3], os.Args[1] == "prepare-runtime-cache"); err != nil {
+				log.Fatal(err)
+			}
+			return
+		}
+	}
+	if len(os.Args) == 3 && os.Args[1] == "prepare-installer-state" {
+		if err := prepareInstallerState(os.Args[2]); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 	if len(os.Args) == 3 && os.Args[1] == "check-workload-bridge" {
 		if err := workload.CheckSocket(os.Args[2]); err != nil {
 			os.Exit(1)
@@ -43,7 +90,7 @@ func main() {
 		return
 	}
 	report := func(format string, a ...any) { logError(cfg.LogFile, format, a...) }
-	os.Exit(lifecycle.Run(cfg, mount.New(config.StateDir), os.Args[1:], report))
+	os.Exit(lifecycle.Run(cfg, mount.New(cfg.StateDir), os.Args[1:], report))
 }
 
 func logError(path, format string, args ...any) {

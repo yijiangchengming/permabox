@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/yijiangchengming/permabox/internal/oci"
+	"github.com/yijiangchengming/permabox/internal/trustedpath"
 )
 
 type routes string
@@ -22,17 +24,71 @@ type route struct {
 	Bundle  string
 }
 
-func (r routes) path(id string) string { return filepath.Join(string(r), id+".runtime") }
-
 func (r routes) lookup(id string) (route, error) {
-	var rec route
-	data, err := os.ReadFile(r.path(id))
+	dir, err := trustedpath.OpenDir(string(r), false, true)
 	if errors.Is(err, os.ErrNotExist) {
-		return rec, nil
+		return route{}, nil
 	}
 	if err != nil {
-		return rec, err
+		return route{}, err
 	}
+	defer dir.Close()
+	return readRoute(dir, id)
+}
+
+// validateRuntimes runs with create admission locked. Deletes and GC may still
+// remove routes, which readRoute treats as absent.
+func (r routes) validateRuntimes(root *os.File, check func(string) error) error {
+	dir, err := trustedpath.OpenDirIn(root, string(r), false, true)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	entries, err := dir.ReadDir(-1)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		id, ok := strings.CutSuffix(entry.Name(), ".runtime")
+		if !ok || !oci.ValidID(id) {
+			continue
+		}
+		rec, err := readRoute(dir, id)
+		if err == nil && rec.Runtime != "" {
+			err = check(rec.Runtime)
+		}
+		if err != nil {
+			return fmt.Errorf("pinned runtime for %s: %w", id, err)
+		}
+	}
+	return nil
+}
+
+func readRoute(dir *os.File, id string) (route, error) {
+	fd, err := syscall.Openat(int(dir.Fd()), id+".runtime", syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
+	if errors.Is(err, os.ErrNotExist) {
+		return route{}, nil
+	}
+	if err != nil {
+		return route{}, err
+	}
+	file := os.NewFile(uintptr(fd), id+".runtime")
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return route{}, err
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0022 != 0 || int(info.Sys().(*syscall.Stat_t).Uid) != os.Geteuid() {
+		return route{}, errors.New("runtime route must be a trusted regular file")
+	}
+	data, err := io.ReadAll(io.LimitReader(file, 64<<10))
+	if err != nil {
+		return route{}, err
+	}
+	var rec route
 	if err := json.Unmarshal(data, &rec); err != nil {
 		return route{}, err
 	}
@@ -53,7 +109,7 @@ func (r routes) pin(id, runtime, bundle string) (bool, error) {
 	}
 	defer lock.Close()
 	want := route{runtime, bundle}
-	got, err := r.lookup(id)
+	got, err := readRoute(lock, id)
 	if err != nil {
 		return false, err
 	}
@@ -63,7 +119,8 @@ func (r routes) pin(id, runtime, bundle string) (bool, error) {
 		}
 		return false, nil
 	}
-	f, err := os.CreateTemp(string(r), ".runtime-")
+	dir := fmt.Sprintf("/proc/self/fd/%d", lock.Fd())
+	f, err := os.CreateTemp(dir, ".runtime-")
 	if err != nil {
 		return false, err
 	}
@@ -71,7 +128,7 @@ func (r routes) pin(id, runtime, bundle string) (bool, error) {
 	if err := errors.Join(json.NewEncoder(f).Encode(want), f.Close()); err != nil {
 		return false, err
 	}
-	err = os.Rename(f.Name(), r.path(id))
+	err = os.Rename(f.Name(), filepath.Join(dir, id+".runtime"))
 	return err == nil, err
 }
 
@@ -84,11 +141,11 @@ func (r routes) forget(id string) error {
 		return err
 	}
 	defer lock.Close()
-	return r.remove(id)
+	return removeRoute(lock, id)
 }
 
-func (r routes) remove(id string) error {
-	err := os.Remove(r.path(id))
+func removeRoute(dir *os.File, id string) error {
+	err := syscall.Unlinkat(int(dir.Fd()), id+".runtime")
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
@@ -104,7 +161,7 @@ func (r routes) sweep(now time.Time, managed func(string) (bool, error)) error {
 		return err
 	}
 	defer lock.Close()
-	entries, err := os.ReadDir(string(r))
+	entries, err := lock.ReadDir(-1)
 	if err != nil {
 		return err
 	}
@@ -122,32 +179,20 @@ func (r routes) sweep(now time.Time, managed func(string) (bool, error)) error {
 			result = errors.Join(result, err)
 			continue
 		}
-		rec, err := r.lookup(id)
+		rec, err := readRoute(lock, id)
 		if err != nil {
 			result = errors.Join(result, err)
 			continue
 		}
 		if _, err := os.Lstat(rec.Bundle); errors.Is(err, os.ErrNotExist) {
-			result = errors.Join(result, r.remove(id))
+			result = errors.Join(result, removeRoute(lock, id))
 		}
 	}
 	return result
 }
 
 func (r routes) lock(create bool) (*os.File, error) {
-	if create {
-		if err := os.MkdirAll(string(r), 0700); err != nil {
-			return nil, err
-		}
-	}
-	info, err := os.Lstat(string(r))
-	if err != nil {
-		return nil, err
-	}
-	if !info.IsDir() || info.Mode().Perm()&0077 != 0 {
-		return nil, errors.New("runtime state directory must be private")
-	}
-	f, err := os.Open(string(r))
+	f, err := trustedpath.OpenDir(string(r), create, true)
 	if err != nil {
 		return nil, err
 	}

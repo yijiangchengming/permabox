@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/yijiangchengming/permabox/internal/mount"
 	"github.com/yijiangchengming/permabox/internal/ownership"
+	"github.com/yijiangchengming/permabox/internal/trustedpath"
 )
 
 type reclaimDecision struct {
@@ -30,6 +32,7 @@ type gcLimits struct {
 }
 
 const gcCursor = ".permabox-gc-cursor"
+const maxGCCursorSize = 4096
 
 func sweepWorkloads(manager mount.Manager, roots []string, target string, ttl time.Duration, now time.Time, reclaim reclaimer) error {
 	limits := gcLimits{owners: 3, ownerTimeout: 2 * time.Second, firstBudget: 7 * time.Second, confirmBudget: 7 * time.Second}
@@ -66,8 +69,13 @@ type ownerGroup struct {
 
 func checkWorkloadBatch(dir string, candidates []mount.ReleasedSlot, limits gcLimits, reclaim reclaimer,
 	apply func([]mount.ReleasedSlot, reclaimDecision, time.Time) error) (result error) {
+	state, err := trustedpath.OpenDir(dir, false, true)
+	if err != nil {
+		return fmt.Errorf("open GC state directory: %w", err)
+	}
+	defer state.Close()
 	// Only policy checks take this lock. Mount operations use a different lock.
-	lock, err := os.OpenFile(filepath.Join(dir, gcCursor+".lock"), os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0600)
+	lock, err := trustedpath.OpenRegularAt(state, gcCursor+".lock", syscall.O_CREAT|syscall.O_RDWR)
 	if err != nil {
 		return fmt.Errorf("open GC cursor lock: %w", err)
 	}
@@ -84,9 +92,9 @@ func checkWorkloadBatch(dir string, candidates []mount.ReleasedSlot, limits gcLi
 	if err != nil {
 		return fmt.Errorf("lock GC cursor: %w", err)
 	}
-	cursorPath := filepath.Join(dir, gcCursor)
-	cursor, err := os.ReadFile(cursorPath)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
+	cursorPath := filepath.Join(trustedpath.FDPath(state), gcCursor)
+	cursor, err := readGCCursor(state)
+	if err != nil {
 		return fmt.Errorf("read GC cursor: %w", err)
 	}
 	groups := make(map[string]*ownerGroup)
@@ -160,7 +168,26 @@ func checkReclaim(parent context.Context, timeout time.Duration, owner ownership
 	return decision, nil
 }
 
+func readGCCursor(state *os.File) ([]byte, error) {
+	file, err := trustedpath.OpenRegularAt(state, gcCursor, syscall.O_RDONLY)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, maxGCCursorSize+1))
+	if len(data) > maxGCCursorSize {
+		return nil, errors.New("GC cursor exceeds 4096 bytes")
+	}
+	return data, err
+}
+
 func writeGCCursor(path, key string) error {
+	if len(key) > maxGCCursorSize {
+		return errors.New("GC cursor exceeds 4096 bytes")
+	}
 	f, err := os.CreateTemp(filepath.Dir(path), gcCursor+"-")
 	if err != nil {
 		return fmt.Errorf("create GC cursor: %w", err)
