@@ -121,7 +121,7 @@ func resolveFile(root, path string) (string, os.FileInfo, error) {
 		}
 		if len(parts) == 0 {
 			if !trustedRegular(info) {
-				return "", nil, fmt.Errorf("%s must be a regular file writable only by its trusted owner", next)
+				return "", nil, fmt.Errorf("%s must be a regular file writable only by its trusted owner (mode %04o, uid %d)", next, info.Mode().Perm(), ownerUID(info))
 			}
 			return next, info, nil
 		}
