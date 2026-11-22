@@ -65,12 +65,24 @@ func TestInvocation(t *testing.T) {
 		{[]string{"kill", "--all", "real-id", "9"}, Invocation{"kill", "real-id", ""}},
 		{[]string{"exec", "--process", "/proc.json", "--detach", "real-id"}, Invocation{"exec", "real-id", ""}},
 		{[]string{"update", "--resources=-", "real-id"}, Invocation{"update", "real-id", ""}},
-		{[]string{"create", "--help", "id"}, Invocation{}},
 		{[]string{"create", "--bundle"}, Invocation{}},
 	} {
 		got, err := Parse(test.args)
 		if got != test.want || (err != nil) != (test.want == (Invocation{})) {
 			t.Errorf("Parse(%q) = %+v, %v; want %+v", test.args, got, err, test.want)
+		}
+	}
+}
+
+func TestInvocationHelpPassesThrough(t *testing.T) {
+	for _, args := range [][]string{
+		{"create", "--help"},
+		{"create", "-h"},
+		{"create", "--help", "id"},
+	} {
+		got, err := Parse(args)
+		if err != nil || got != (Invocation{}) {
+			t.Errorf("Parse(%q) = %+v, %v; want passthrough", args, got, err)
 		}
 	}
 }

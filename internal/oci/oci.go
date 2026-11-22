@@ -98,6 +98,9 @@ func Parse(args []string) (Invocation, error) {
 			i++
 			break
 		}
+		if args[i] == "--help" || args[i] == "-h" {
+			return Invocation{}, nil
+		}
 		end, name, value, ok := flag(args, i, values, switches)
 		if !ok {
 			return Invocation{}, fmt.Errorf("%s: unsupported or incomplete OCI option %q", inv.Command, args[i])
