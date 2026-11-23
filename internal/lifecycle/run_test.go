@@ -24,6 +24,73 @@ func TestPassthroughProcess(t *testing.T) {
 	}
 }
 
+func TestRuntimeRequiresTrustedPath(t *testing.T) {
+	base := privateStateDir(t)
+	data := filepath.Join(base, "data")
+	path := filepath.Join(data, "version", "bin", "runc")
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, nil, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("version", filepath.Join(data, "current")); err != nil {
+		t.Fatal(err)
+	}
+	runtime := filepath.Join(data, "current", "bin", "runc")
+	if got, err := checkRuntime(runtime); err != nil || got != path {
+		t.Fatalf("trusted runtime link = %q, %v; want %q", got, err, path)
+	}
+	for _, untrusted := range []string{path, data} {
+		t.Run(filepath.Base(untrusted), func(t *testing.T) {
+			if err := os.Chmod(untrusted, 0777); err != nil {
+				t.Fatal(err)
+			}
+			defer os.Chmod(untrusted, 0755)
+			if _, err := checkRuntime(runtime); err == nil {
+				t.Errorf("accepted runtime with writable component %s", untrusted)
+			}
+		})
+	}
+}
+
+func TestRejectsUnsafeStateAndUnreadableBundle(t *testing.T) {
+	base := privateStateDir(t)
+	if err := os.Chmod(base, 0777); err != nil {
+		t.Fatal(err)
+	}
+	if out, _, code := call(t, base, "0", "state", "id"); code != 1 || out != "" {
+		t.Fatalf("unsafe state: stdout=%q exit=%d", out, code)
+	}
+	if err := os.Chmod(base, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, data := range []string{"", "{"} {
+		if data != "" {
+			if err := os.WriteFile(filepath.Join(base, "config.json"), []byte(data), 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if out, _, code := call(t, base, "0", "create", "-b", base, "id"); code != 1 || out != "" {
+			t.Fatalf("invalid bundle %q: stdout=%q exit=%d", data, out, code)
+		}
+	}
+}
+
+func TestUnsupportedOCIInvocationDoesNotReachRuntime(t *testing.T) {
+	base := privateStateDir(t)
+	for _, args := range [][]string{
+		{"create", "--unknown-option", "id"},
+		{"--unknown-option", "delete", "id"},
+		{"restore", "id"},
+	} {
+		out, stderr, code := call(t, base, "0", args...)
+		if out != "" || stderr != "" || code != 1 {
+			t.Fatalf("%q: stdout=%q stderr=%q exit=%d", args, out, stderr, code)
+		}
+	}
+}
+
 func TestManagedDeleteRetainsStateUntilSuccess(t *testing.T) {
 	base := privateStateDir(t)
 	journal := filepath.Join(base, "id.json")
@@ -200,6 +267,7 @@ func TestOwnershipCommitFailureDoesNotChangeStartStatus(t *testing.T) {
 }
 
 func TestRuntimeOverrideStaysPinnedUntilDelete(t *testing.T) {
+	t.Setenv("TEST_TRUSTED_NAMESPACES", "[trusted]")
 	base := privateStateDir(t)
 	bundle := filepath.Join(base, "bundle")
 	if err := os.Mkdir(bundle, 0700); err != nil {
@@ -210,8 +278,18 @@ func TestRuntimeOverrideStaysPinnedUntilDelete(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	write(filepath.Join(bundle, "config.json"), `{"annotations":{"permabox.io/underlying-runtime":"alternate"}}`)
 	write(filepath.Join(base, "alternate"), "#!/bin/sh\nprintf 'alternate %s\\n' \"$1\"\nexit \"$TEST_STATUS\"\n")
+	for _, namespace := range []string{"", "untrusted"} {
+		write(filepath.Join(bundle, "config.json"), fmt.Sprintf(`{"annotations":{"io.kubernetes.cri.sandbox-namespace":%q,"permabox.io/underlying-runtime":"alternate"}}`, namespace))
+		out, stderr, code := call(t, base, "0", "create", "--bundle", bundle, "test-id")
+		if out != "" || stderr != "" || code != 1 {
+			t.Fatalf("runtime override from namespace %q: %q %q %d", namespace, out, stderr, code)
+		}
+		if _, err := os.Stat(filepath.Join(base, "test-id.runtime")); !os.IsNotExist(err) {
+			t.Fatalf("denied runtime override left a route: %v", err)
+		}
+	}
+	write(filepath.Join(bundle, "config.json"), `{"annotations":{"io.kubernetes.cri.sandbox-namespace":"trusted","permabox.io/underlying-runtime":"alternate"}}`)
 	for _, tc := range []struct {
 		command, status string
 		code            int
@@ -234,7 +312,7 @@ func TestRuntimeOverrideStaysPinnedUntilDelete(t *testing.T) {
 	if out != "state\ntest-id\nforwarded\n" {
 		t.Fatalf("after delete: %q", out)
 	}
-	write(filepath.Join(bundle, "config.json"), `{"annotations":{"permabox.io/underlying-runtime":"/usr/bin/unsafe"}}`)
+	write(filepath.Join(bundle, "config.json"), `{"annotations":{"io.kubernetes.cri.sandbox-namespace":"trusted","permabox.io/underlying-runtime":"/usr/bin/unsafe"}}`)
 	out, stderr, code := call(t, base, "0", "create", "--bundle", bundle, "new-id")
 	if out != "" || stderr != "" || code != 1 {
 		t.Fatalf("unknown alias: %q %q %d", out, stderr, code)

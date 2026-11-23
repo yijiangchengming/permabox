@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -13,6 +14,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/yijiangchengming/permabox/internal/trustedpath"
 )
 
 const DefaultSocket = "/opt/permabox-k3s/workload.sock"
@@ -35,10 +38,72 @@ func UnixClient(path string) Client {
 	return Client{base: "http://permabox.local", http: &http.Client{
 		Timeout: 2 * time.Second,
 		Transport: &http.Transport{DisableKeepAlives: true, DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-			return (&net.Dialer{}).DialContext(ctx, "unix", path)
+			return dialBridge(ctx, path)
 		}},
 		CheckRedirect: noRedirect,
 	}}
+}
+
+func checkSocketDir(path string) error {
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return errors.New("workload socket must have a clean absolute path")
+	}
+	dir, err := trustedpath.OpenDir(filepath.Dir(path), false, true)
+	if err != nil {
+		return fmt.Errorf("workload socket directory: %w", err)
+	}
+	return dir.Close()
+}
+
+func dialBridge(ctx context.Context, path string) (net.Conn, error) {
+	if err := checkSocketDir(path); err != nil {
+		return nil, err
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	uid := uint32(os.Geteuid())
+	if err := checkSocketOwner(info, uid); err != nil {
+		return nil, err
+	}
+	conn, err := (&net.Dialer{}).DialContext(ctx, "unix", path)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkBridgePeer(conn.(*net.UnixConn), uid); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	return conn, nil
+}
+
+func checkSocketOwner(info os.FileInfo, uid uint32) error {
+	if info.Mode()&os.ModeSocket == 0 || info.Sys().(*syscall.Stat_t).Uid != uid {
+		return errors.New("workload socket must be a Unix socket owned by the runtime user")
+	}
+	return nil
+}
+
+func checkBridgePeer(conn *net.UnixConn, uid uint32) error {
+	raw, err := conn.SyscallConn()
+	if err != nil {
+		return err
+	}
+	var peer *syscall.Ucred
+	var credErr error
+	if err := raw.Control(func(fd uintptr) {
+		peer, credErr = syscall.GetsockoptUcred(int(fd), syscall.SOL_SOCKET, syscall.SO_PEERCRED)
+	}); err != nil {
+		return err
+	}
+	if credErr != nil {
+		return credErr
+	}
+	if peer.Uid != uid {
+		return fmt.Errorf("workload socket peer UID %d does not match runtime UID %d", peer.Uid, uid)
+	}
+	return nil
 }
 
 func noRedirect(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
@@ -94,12 +159,8 @@ func Serve(path string) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /readyz", c.readiness(namespace))
 	mux.HandleFunc("/", c.serveMetadata)
-	info, err := os.Lstat(filepath.Dir(path))
-	if err != nil {
+	if err := checkSocketDir(path); err != nil {
 		return err
-	}
-	if !info.IsDir() || info.Mode().Perm()&0077 != 0 {
-		return errors.New("workload socket directory must be private (0700)")
 	}
 	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0600)
 	if err != nil {
@@ -110,8 +171,8 @@ func Serve(path string) error {
 		return err
 	}
 	if socket, err := os.Lstat(path); err == nil {
-		if socket.Mode()&os.ModeSocket == 0 {
-			return errors.New("refusing to replace a non-socket at workload_socket")
+		if err := checkSocketOwner(socket, uint32(os.Geteuid())); err != nil {
+			return err
 		}
 		if err := os.Remove(path); err != nil {
 			return err

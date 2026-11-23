@@ -1,5 +1,6 @@
 # syntax=docker/dockerfile:1
-FROM --platform=$BUILDPLATFORM golang:1.25-bookworm AS build
+FROM --platform=$BUILDPLATFORM golang:1.27-bookworm AS build
+ENV GOTOOLCHAIN=local
 ARG TARGETOS
 ARG TARGETARCH
 WORKDIR /src

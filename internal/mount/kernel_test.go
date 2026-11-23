@@ -108,6 +108,49 @@ func TestKernelPersistence(t *testing.T) {
 	if _, err := os.Stat(slot); !os.IsNotExist(err) {
 		t.Fatalf("released slot still exists after immediate reclaim: %v", err)
 	}
+	t.Run("retirement does not cross bind mounts", func(t *testing.T) {
+		prepareReleasedSlot(t, slot, time.Now())
+		parked, err := retireSlot(slot, time.Time{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		source := filepath.Join(base, "protected-bind-source")
+		mkdir(t, source)
+		put(t, source, "data", "keep")
+		target := filepath.Join(parked, "upper")
+		if err := syscall.Mount(source, target, "", syscall.MS_BIND, ""); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = syscall.Unmount(target, 0) })
+		parent, err := os.Open(filepath.Dir(parked))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer parent.Close()
+		dir, err := os.Open(parked)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer dir.Close()
+		mountID, err := directoryMountID(parent)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := removeRetiredContents(dir, mountID); err == nil {
+			t.Fatal("recursive deletion entered a bind mount")
+		}
+		if err := m.deleteRetired(parked); err == nil {
+			t.Fatal("final deletion ignored a mount reference")
+		}
+		check(t, source, "data", "keep")
+		if err := syscall.Unmount(target, 0); err != nil {
+			t.Fatal(err)
+		}
+		if err := m.deleteRetired(parked); err != nil {
+			t.Fatal(err)
+		}
+		assertMissing(t, parked)
+	})
 }
 
 func mkdir(t *testing.T, path string) {

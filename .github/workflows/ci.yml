@@ -90,6 +90,8 @@ jobs:
         env:
           INSTALL_K3S_VERSION: v1.34.5+k3s1
         run: |
+          sudo chmod 0755 /opt
+          sudo chmod 0755 /usr/local/bin
           curl --fail --silent --show-error --location --retry 3 \
             "https://raw.githubusercontent.com/k3s-io/k3s/${INSTALL_K3S_VERSION}/install.sh" \
             --output "$RUNNER_TEMP/install-k3s.sh"

@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -62,7 +63,11 @@ func TestUnixBridgePreservesAuthoritativeNotFound(t *testing.T) {
 		fmt.Fprint(w, `{"reason":"NotFound","details":{"name":"app"}}`)
 	}))
 	defer upstream.Close()
-	path := filepath.Join(t.TempDir(), "bridge.sock")
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "bridge.sock")
 	listener, err := net.Listen("unix", path)
 	if err != nil {
 		t.Fatal(err)
@@ -88,6 +93,41 @@ func TestUnixBridgePreservesAuthoritativeNotFound(t *testing.T) {
 		if resp.StatusCode != http.StatusBadRequest {
 			t.Errorf("unsupported path %s returned %d", path, resp.StatusCode)
 		}
+	}
+}
+
+func TestCheckSocketRequiresPrivateDirectory(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "bridge.sock")
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})}
+	defer server.Close()
+	go server.Serve(listener)
+	if err := CheckSocket(path); err != nil {
+		t.Fatalf("private socket: %v", err)
+	}
+	conn, err := net.DialUnix("unix", nil, &net.UnixAddr{Name: path, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if err := checkBridgePeer(conn, uint32(os.Geteuid())+1); err == nil {
+		t.Fatal("accepted an unexpected bridge UID")
+	}
+	if err := os.Chmod(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckSocket(path); err == nil {
+		t.Fatal("accepted a socket outside a private directory")
 	}
 }
 

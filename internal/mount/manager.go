@@ -14,11 +14,17 @@ import (
 
 	"github.com/yijiangchengming/permabox/internal/oci"
 	"github.com/yijiangchengming/permabox/internal/ownership"
+	"github.com/yijiangchengming/permabox/internal/trustedpath"
 )
 
 type Manager struct {
 	Dir string
 	sys system
+}
+
+type lockedManager struct {
+	Manager
+	*os.File
 }
 
 func New(dir string) Manager { return Manager{Dir: dir, sys: linux{}} }
@@ -27,11 +33,17 @@ type record struct {
 	Namespace    string           `json:"mount_namespace"`
 	Root         string           `json:"root"`
 	Slot         string           `json:"slot"`
+	SlotIdentity *slotIdentity    `json:"slot_identity,omitempty"`
 	LowerID      int              `json:"lower_mount_id,omitempty"`
 	OverlayID    int              `json:"overlay_mount_id,omitempty"`
 	ReleasedAt   time.Time        `json:"released_at,omitempty"`
 	PendingOwner *ownership.Owner `json:"pending_workload_owner,omitempty"`
 	Started      bool             `json:"ownership_commit_pending,omitempty"`
+}
+
+type slotIdentity struct {
+	Device uint64 `json:"device"`
+	Inode  uint64 `json:"inode"`
 }
 
 func (r record) MarshalJSON() ([]byte, error) {
@@ -48,8 +60,11 @@ func (r record) MarshalJSON() ([]byte, error) {
 
 const releasedMarker = ".permabox-released.json"
 
-func (m Manager) journal(id string) string { return filepath.Join(m.Dir, id+".json") }
-func (m Manager) alias(id string) string   { return filepath.Join(m.Dir, id+".lower") }
+func (m lockedManager) journal(id string) string {
+	return filepath.Join(trustedpath.FDPath(m.File), id+".json")
+}
+
+func (m Manager) alias(id string) string { return filepath.Join(m.Dir, id+".lower") }
 
 // Prepare returns true only when this call installed a new overlay.
 func (m Manager) Prepare(id, root, slot, container string) (bool, error) {
@@ -60,7 +75,17 @@ func (m Manager) PrepareOwned(id, root, slot, container string, owner ownership.
 	if !oci.ValidID(id) {
 		return false, errors.New("invalid container ID")
 	}
-	root, err := filepath.EvalSymlinks(root)
+	if len(container) > maxContainerRecordSize {
+		return false, errors.New("container name exceeds the storage marker limit")
+	}
+	containerRecord, err := json.Marshal(container)
+	if err != nil {
+		return false, err
+	}
+	if len(containerRecord) > maxContainerRecordSize {
+		return false, errors.New("encoded container name exceeds the storage marker limit")
+	}
+	root, err = filepath.EvalSymlinks(root)
 	if err != nil {
 		return false, err
 	}
@@ -79,15 +104,14 @@ func (m Manager) PrepareOwned(id, root, slot, container string, owner ownership.
 	if isRetiredPath(slot) {
 		return false, errors.New("reserved storage slot path")
 	}
-	if err := os.MkdirAll(slot, 0700); err != nil {
-		return false, err
-	}
-	slot, err = filepath.EvalSymlinks(slot)
+	slotDir, err := openStorageSlot(slot, true)
 	if err != nil {
 		return false, err
 	}
-	if overlap(root, slot) || overlap(slot, m.Dir) || isRetiredPath(slot) {
-		return false, errors.New("resolved storage slot overlaps runtime directories or uses a reserved path")
+	defer slotDir.Close()
+	slotInfo, err := slotDir.Stat()
+	if err != nil {
+		return false, err
 	}
 	alias := m.alias(id)
 	if strings.ContainsAny(alias+slot, ",:\\\n\r\t\x00") {
@@ -97,49 +121,72 @@ func (m Manager) PrepareOwned(id, root, slot, container string, owner ownership.
 	if err != nil {
 		return false, err
 	}
-	want := record{Namespace: ns, Root: root, Slot: slot, PendingOwner: &owner}
-	prev, err := readRecord(m.journal(id))
-	switch {
-	case err == nil:
+	identity := storageIdentity(slotInfo)
+	want := record{Namespace: ns, Root: root, Slot: slot, SlotIdentity: &identity, PendingOwner: &owner}
+	prev, err := readRecord(lock.journal(id))
+	retry := err == nil
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
+	if retry {
 		if prev.Namespace != ns || prev.Root != root || prev.Slot != slot {
 			return false, errors.New("container ID already has a different persistence record")
+		}
+		if prev.SlotIdentity != nil && *prev.SlotIdentity != identity {
+			return false, errors.New("storage directory has changed since the previous create")
 		}
 		if !prev.ReleasedAt.IsZero() {
 			return false, errors.New("previous delete still needs cleanup")
 		}
-		if err := bindSlotOwner(slot, owner); err != nil {
-			return false, err
-		}
-		mounts, err := m.sys.mounts()
-		if err != nil {
-			return false, err
-		}
-		own, err := findOverlay(mounts, prev, alias)
-		if err == nil && own == 0 {
-			err = errors.New("previous create was interrupted; delete the container before retrying")
-		}
-		if err == nil {
-			err = removeDurable(filepath.Join(slot, releasedMarker))
-		}
-		return false, err
-	case !errors.Is(err, os.ErrNotExist):
-		return false, err
 	}
-	journals, err := os.ReadDir(m.Dir)
+	journals, err := lock.ReadDir(-1)
 	if err != nil {
 		return false, err
 	}
 	for _, file := range journals {
-		if !strings.HasSuffix(file.Name(), ".json") {
+		if file.Name() == id+".json" || !strings.HasSuffix(file.Name(), ".json") {
 			continue
 		}
-		other, err := readRecord(filepath.Join(m.Dir, file.Name()))
+		other, err := readRecord(filepath.Join(trustedpath.FDPath(lock.File), file.Name()))
 		if err != nil {
 			return false, err
 		}
 		if other.Slot == slot || (other.Namespace == ns && other.Root == root) {
 			return false, fmt.Errorf("rootfs or storage slot already in use by %s", file.Name())
 		}
+		if other.SlotIdentity != nil {
+			if *other.SlotIdentity == identity {
+				return false, fmt.Errorf("storage slot already in use through a different path by %s", file.Name())
+			}
+			continue
+		}
+		if other.Namespace != ns {
+			return false, fmt.Errorf("cannot verify the storage identity of legacy journal %s from a different mount namespace", file.Name())
+		}
+		otherSlot, err := os.Stat(other.Slot)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return false, fmt.Errorf("inspect storage slot for %s: %w", file.Name(), err)
+		}
+		if err == nil && os.SameFile(slotInfo, otherSlot) {
+			return false, fmt.Errorf("storage slot already in use through a different path by %s", file.Name())
+		}
+	}
+	if retry {
+		mounts, err := m.sys.mounts()
+		if err != nil {
+			return false, err
+		}
+		own, err := findOverlay(mounts, prev, alias)
+		if err != nil {
+			return false, err
+		}
+		if own == 0 {
+			return false, errors.New("previous create was interrupted; delete the container before retrying")
+		}
+		if err := bindSlotOwner(slot, owner); err != nil {
+			return false, err
+		}
+		return false, removeDurable(filepath.Join(slot, releasedMarker))
 	}
 	if _, err := os.Lstat(alias); !errors.Is(err, os.ErrNotExist) {
 		return false, fmt.Errorf("lower mount path is not available: %s", alias)
@@ -151,12 +198,16 @@ func (m Manager) PrepareOwned(id, root, slot, container string, owner ownership.
 		if err != nil {
 			return false, err
 		}
-		fresh = len(entries) == 0 || (readMarker(filepath.Join(slot, useMarker), &previous) && previous.Fresh && !previous.Confirmed)
+		markerErr := readStorageRecord(filepath.Join(slot, useMarker), &previous)
+		if markerErr != nil && !errors.Is(markerErr, os.ErrNotExist) {
+			return false, fmt.Errorf("read writable layer use marker: %w", markerErr)
+		}
+		fresh = len(entries) == 0 || (markerErr == nil && previous.Fresh && !previous.Confirmed)
 	}
 	if err := bindSlotOwner(slot, owner); err != nil {
 		return false, err
 	}
-	if err := prepareSlot(slot, container, info); err != nil {
+	if err := prepareSlot(slotDir, container, containerRecord, info); err != nil {
 		return false, err
 	}
 	if err := removeDurable(filepath.Join(slot, releasedMarker)); err != nil {
@@ -170,14 +221,14 @@ func (m Manager) PrepareOwned(id, root, slot, container string, owner ownership.
 	if err := removeDurable(filepath.Join(slot, scaleDownMarker)); err != nil {
 		return false, err
 	}
-	if err := writeRecord(m.journal(id), want); err != nil {
+	if err := writeRecord(lock.journal(id), want); err != nil {
 		return false, err
 	}
-	if err := m.install(id, &want); err != nil {
+	if err := lock.install(id, &want); err != nil {
 		if fresh {
-			return false, errors.Join(err, m.releaseLocked(id, want, time.Now().UTC()))
+			return false, errors.Join(err, lock.releaseLocked(id, want, time.Now().UTC()))
 		}
-		return false, errors.Join(err, m.cleanupLocked(id, want))
+		return false, errors.Join(err, lock.cleanupLockedAt(id, want, time.Time{}))
 	}
 	return true, nil
 }
@@ -195,7 +246,7 @@ func (m Manager) ActivateOwnership(id string) error {
 		return err
 	}
 	defer lock.Close()
-	state, err := readRecord(m.journal(id))
+	state, err := readRecord(lock.journal(id))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
@@ -206,20 +257,29 @@ func (m Manager) ActivateOwnership(id string) error {
 		return nil
 	}
 	state.Started = true
-	if err := writeRecord(m.journal(id), state); err != nil {
+	if err := writeRecord(lock.journal(id), state); err != nil {
 		return err
 	}
-	return m.commitOwnership(id, state)
+	return lock.commitOwnership(id, state)
 }
 
-func (m Manager) commitOwnership(id string, state record) error {
+func (m lockedManager) commitOwnership(id string, state record) error {
 	if !state.Started || state.PendingOwner == nil || !state.PendingOwner.Valid() {
 		return nil
 	}
-	if err := realDir(state.Slot); err != nil {
+	slot, err := openRecordedSlot(state)
+	if err != nil {
 		return err
 	}
-	if err := confirmSlotUse(state.Slot, id, *state.PendingOwner); err != nil {
+	defer slot.Close()
+	return m.commitSlotOwnership(id, state, trustedpath.FDPath(slot))
+}
+
+func (m lockedManager) commitSlotOwnership(id string, state record, slot string) error {
+	if !state.Started || state.PendingOwner == nil || !state.PendingOwner.Valid() {
+		return nil
+	}
+	if err := confirmSlotUse(slot, id, *state.PendingOwner); err != nil {
 		return err
 	}
 	state.Started = false
@@ -227,7 +287,7 @@ func (m Manager) commitOwnership(id string, state record) error {
 	return writeRecord(m.journal(id), state)
 }
 
-func (m Manager) install(id string, state *record) error {
+func (m lockedManager) install(id string, state *record) error {
 	alias := m.alias(id)
 	if err := os.Mkdir(alias, 0700); err != nil {
 		return err
@@ -277,39 +337,34 @@ func overlayOptions(state record, alias string) string {
 	return "lowerdir=" + alias + ",upperdir=" + filepath.Join(state.Slot, "upper") + ",workdir=" + filepath.Join(state.Slot, "work")
 }
 
-func prepareSlot(slot, container string, root os.FileInfo) error {
+func prepareSlot(dir *os.File, container string, containerRecord []byte, root os.FileInfo) error {
+	slot := dir.Name()
 	owner := filepath.Join(slot, "container.json")
-	name, err := os.ReadFile(owner)
+	saved, err := readContainerRecord(owner)
 	if errors.Is(err, os.ErrNotExist) {
-		if err := writeRecord(owner, container); err != nil {
+		if err := writeRecordData(owner, containerRecord); err != nil {
 			return err
 		}
 	} else if err != nil {
 		return err
-	} else {
-		var saved string
-		if err := json.Unmarshal(name, &saved); err != nil {
-			return err
-		}
-		if saved != container {
-			return fmt.Errorf("storage slot belongs to container %q, not %q", saved, container)
-		}
+	} else if saved != container {
+		return fmt.Errorf("storage slot belongs to container %q, not %q", saved, container)
 	}
-	upper, work := filepath.Join(slot, "upper"), filepath.Join(slot, "work")
+	work, err := trustedpath.OpenChild(dir, "work", true, true)
+	if err != nil {
+		return err
+	}
+	defer work.Close()
+	upper := filepath.Join(slot, "upper")
 	if err := initUpper(upper, root); err != nil {
 		return err
 	}
-	if err := os.Mkdir(work, 0700); err != nil && !errors.Is(err, os.ErrExist) {
+	info, err := os.Lstat(upper)
+	if err != nil {
 		return err
 	}
-	for _, dir := range []string{upper, work} {
-		info, err := os.Lstat(dir)
-		if err != nil {
-			return err
-		}
-		if !info.IsDir() {
-			return fmt.Errorf("not a directory: %s", dir)
-		}
+	if !info.IsDir() {
+		return fmt.Errorf("not a directory: %s", upper)
 	}
 	return nil
 }
@@ -338,9 +393,20 @@ func (m Manager) Managed(id string) (bool, error) {
 	if !oci.ValidID(id) {
 		return false, errors.New("invalid container ID")
 	}
-	_, err := os.Stat(m.journal(id))
+	dir, err := trustedpath.OpenDir(m.Dir, false, true)
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	defer dir.Close()
+	info, err := os.Lstat(filepath.Join(trustedpath.FDPath(dir), id+".json"))
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err == nil && !info.Mode().IsRegular() {
+		return false, errors.New("invalid persistence journal")
 	}
 	return err == nil, err
 }
@@ -363,42 +429,50 @@ func (m Manager) CleanupSlot(id string) (string, error) {
 		return "", err
 	}
 	defer lock.Close()
-	state, err := readRecord(m.journal(id))
+	state, err := readRecord(lock.journal(id))
 	if errors.Is(err, os.ErrNotExist) {
 		return "", nil
 	}
 	if err != nil {
 		return "", err
 	}
-	if err := m.releaseLocked(id, state, time.Now().UTC()); err != nil {
+	if err := lock.releaseLocked(id, state, time.Now().UTC()); err != nil {
 		return "", err
 	}
 	return state.Slot, nil
 }
 
-func (m Manager) releaseLocked(id string, state record, now time.Time) error {
+func (m lockedManager) releaseLocked(id string, state record, now time.Time) error {
 	if state.ReleasedAt.IsZero() {
 		state.ReleasedAt = now
 		if err := writeRecord(m.journal(id), state); err != nil {
 			return err
 		}
-	} else if err := syncDir(m.Dir); err != nil {
+	} else if err := m.Sync(); err != nil {
 		return err
 	}
 	return m.cleanupLockedAt(id, state, now)
 }
 
-func (m Manager) cleanupLocked(id string, state record) error {
-	return m.cleanupLockedAt(id, state, time.Time{}) // Interrupted create rollback.
-}
-
-func (m Manager) cleanupLockedAt(id string, state record, now time.Time) error {
+func (m lockedManager) cleanupLockedAt(id string, state record, now time.Time) error {
 	ns, err := m.sys.namespace()
 	if err != nil {
 		return err
 	}
 	if ns != state.Namespace {
 		return errors.New("mount namespace differs from create; persistence record retained")
+	}
+	var slot *os.File
+	if !now.IsZero() {
+		slot, err = openRecordedSlot(state)
+		if err != nil {
+			needsOwner := state.Started && state.PendingOwner != nil && state.PendingOwner.Valid()
+			if state.SlotIdentity != nil || needsOwner || (!errors.Is(err, os.ErrNotExist) && !errors.Is(err, trustedpath.ErrUnsafeDir)) {
+				return err
+			}
+		} else {
+			defer slot.Close()
+		}
 	}
 	alias := m.alias(id)
 	mounts, err := m.sys.mounts()
@@ -449,16 +523,13 @@ func (m Manager) cleanupLockedAt(id string, state record, now time.Time) error {
 	if err := remove(alias); err != nil {
 		return err
 	}
-	if !now.IsZero() {
-		if err := m.commitOwnership(id, state); err != nil {
+	if slot != nil {
+		path := trustedpath.FDPath(slot)
+		if err := m.commitSlotOwnership(id, state, path); err != nil {
 			return err
 		}
-		owned, err := ownedSlot(state.Slot)
-		if err != nil {
-			return err
-		}
-		if owned {
-			if err := writeRecord(filepath.Join(state.Slot, releasedMarker), now); err != nil {
+		if _, err := readContainerRecord(filepath.Join(path, "container.json")); err == nil {
+			if err := writeRecord(filepath.Join(path, releasedMarker), now); err != nil {
 				return err
 			}
 		}
@@ -534,20 +605,8 @@ func hasLayers(options, expected string) bool {
 	return true
 }
 
-func (m Manager) lock(create bool) (*os.File, error) {
-	if create {
-		if err := os.MkdirAll(m.Dir, 0700); err != nil {
-			return nil, err
-		}
-	}
-	info, err := os.Lstat(m.Dir)
-	if err != nil {
-		return nil, err
-	}
-	if !info.IsDir() || info.Mode().Perm()&0077 != 0 {
-		return nil, errors.New("state directory must be private (0700)")
-	}
-	f, err := os.Open(m.Dir)
+func (m Manager) lock(create bool) (*lockedManager, error) {
+	f, err := trustedpath.OpenDir(m.Dir, create, true)
 	if err != nil {
 		return nil, err
 	}
@@ -561,7 +620,7 @@ func (m Manager) lock(create bool) (*os.File, error) {
 		f.Close()
 		return nil, err
 	}
-	return f, nil
+	return &lockedManager{Manager: m, File: f}, nil
 }
 
 func overlap(a, b string) bool {
@@ -571,12 +630,8 @@ func overlap(a, b string) bool {
 
 func readRecord(path string) (record, error) {
 	var out record
-	data, err := os.ReadFile(path)
-	if err != nil {
+	if err := readRecordFile(path, 64<<10, &out); err != nil {
 		return out, err
-	}
-	if err := json.Unmarshal(data, &out); err != nil {
-		return out, fmt.Errorf("decode %s: %w", path, err)
 	}
 	if out.Namespace == "" || !filepath.IsAbs(out.Root) || !filepath.IsAbs(out.Slot) ||
 		filepath.Clean(out.Root) != out.Root || filepath.Clean(out.Slot) != out.Slot {
@@ -590,6 +645,10 @@ func writeRecord(path string, value any) error {
 	if err != nil {
 		return err
 	}
+	return writeRecordData(path, data)
+}
+
+func writeRecordData(path string, data []byte) error {
 	f, err := os.CreateTemp(filepath.Dir(path), ".record-")
 	if err != nil {
 		return err

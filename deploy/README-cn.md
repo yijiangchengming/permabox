@@ -25,14 +25,22 @@ sudo test -x /usr/bin/runc
 
 运行示例前，在节点配置中设置 `trusted_namespaces: [permabox-demo]`。默认空名单拒绝持久化，普通运行时透传仍可使用。仅当你信任命名空间内所有 Pod 创建者访问该命名空间的全部写层时，才将其加入名单。核验 StatefulSet UID 无法隔离同一命名空间内有权创建 Pod 的用户。升级时请显式配置名单。
 
+在同一节点手动部署多个运行时实例时，为每个实例使用独立配置文件，并将 `state_dir` 设为各自专用、由 root 控制的绝对目录。默认值为 `/run/permabox`。每个实例的 OCI 包装器和 GC 服务须使用同一份配置，各实例也应使用独立的存储根目录。切换状态目录前，请先排空并清理已有容器。K3s Helm 安装器使用默认状态目录。
+
+PermaBox 会在调用运行时前拒绝不支持的 OCI 命令、无法识别的生命周期参数，以及无法读取或无效的创建配置。升级前请检查运行时的 OCI 命令兼容性。状态目录必须是运行时用户拥有的私有目录。请使用受信的上级目录，并避免在状态路径中使用符号链接。
+
+请使用由 CRI 管理的 OCI bundle，并将其置于受信任且不含符号链接的路径下。bundle 目录及普通文件 `config.json` 仅允许其受信任的所有者写入，配置上限为 4 MiB。底层运行时会在 PermaBox 检查后重新读取配置，因此整个 `create` 期间应保持配置不变。
+
 | 环境变量 | 用途 |
 | --- | --- |
 | `PERMABOX_CONFIG` | 配置文件路径，默认 `/etc/permabox/config.yaml` |
 | `PERMABOX_STORAGE_ROOT` | 覆盖 `storage_root` |
 | `PERMABOX_UNDERLYING_RUNTIME` | 覆盖 `underlying_runtime` |
-| `PERMABOX_LOG_FILE` | 覆盖 `log_file` |
+| `PERMABOX_LOG_FILE` | 覆盖 `log_file`。请使用仅受信宿主机管理员可写目录下的普通文件。日志路径的末端为符号链接时会被拒绝。 |
 | `PERMABOX_PERSIST_ANNOTATION` | 覆盖 `persist_annotation` |
 | `PERMABOX_GC_IDLE_TTL` | 覆盖 `gc_idle_ttl` |
+
+节点配置须为不超过 1 MiB 的普通文件。配置文件、上级目录及路径中的符号链接均应由 root 控制。运行时和 GC 都要求 `state_dir` 由运行时用户拥有且仅该用户可访问，上级目录须可信，路径中不能有符号链接。
 
 环境变量须由宿主机运行时进程继承，写入业务容器的 `env` 无效。建议使用节点配置文件；无需给 OCI 调用添加 PermaBox 专用命令行参数。
 
@@ -45,9 +53,19 @@ underlying_runtimes:
   gpu: /usr/bin/nvidia-container-runtime
 ```
 
-在 Pod（或 StatefulSet 的 `spec.template.metadata.annotations`）上设置 `permabox.io/storage-root: fast`，为选中持久化的业务容器使用 `fast` 对应的写层根目录。设置 `permabox.io/underlying-runtime: gpu`，为 Pod 的业务容器选择 `gpu` 运行时，即使业务容器未开启持久化；sandbox 始终使用默认运行时。省略注解时使用 `storage_root` 和 `underlying_runtime`。别名只是路径选择，更改存储根目录不会迁移旧数据。请确保每个目标节点上的存储为本地文件系统、运行时二进制已安装且可以执行。
+在 Pod（或 StatefulSet 的 `spec.template.metadata.annotations`）上设置 `permabox.io/storage-root: fast`，为选中持久化的业务容器使用 `fast` 对应的写层根目录。设置 `permabox.io/underlying-runtime: gpu`，为 Pod 的业务容器选择 `gpu` 运行时，即使业务容器未开启持久化。运行时别名要求 Pod 的命名空间列入 `trusted_namespaces`。共享集群应通过准入策略限制哪些工作负载可以使用该 RuntimeClass 和运行时别名。sandbox 始终使用默认运行时。省略注解时使用 `storage_root` 和 `underlying_runtime`。别名只是路径选择，更改存储根目录不会迁移旧数据。请确保每个目标节点上的存储为本地文件系统、运行时二进制已安装且可以执行。
+
+生产环境应将各存储根目录放在容量受限的独立文件系统上，与节点系统盘和运行时数据隔离。PermaBox 写层位于运行时快照存储之外。请在支持的文件系统上通过宿主机配置块空间和 inode 配额，监控两项指标，并在目标文件系统验证配额是否生效。独立文件系统可限制对节点的影响，按写层设置配额还可限制共享该文件系统的工作负载之间的资源争用。
+
+默认运行时和所有运行时别名都应位于 root 控制的路径上，只有 root 可以修改可执行文件或变更其路径。PermaBox 会检查符号链接经过的路径组件及最终目标。升级期间也应保护这些路径，并以原子方式替换可执行文件或版本链接。
+
+各本地存储根目录、命名空间目录和 Pod 写层目录应由 root 控制。PermaBox 拒绝这些目录中的符号链接及所属组或其他用户的写权限。每个写层的 OverlayFS `work` 目录必须由运行时用户拥有，并限制为仅该用户可访问。GC 会跳过不安全的存储路径。升级前请检查现有路径和标记文件，迁移链接路径前先排空受影响的工作负载。
+
+创建容器前，PermaBox 会按设备号和 inode 检查写层是否已被占用，包括绑定挂载以不同路径指向同一写层的情况。新挂载记录会保存设备号和 inode。如果其他挂载命名空间的旧记录阻止创建，请先在原命名空间完成清理。使用独立状态目录的运行时实例仍须使用独立存储。`container.json` 的读写上限统一为 24 MiB，可覆盖有效 OCI 配置中容器名的 JSON 转义。
 
 ## 2. 注册 containerd handler
+
+挂载记录包含存储目录身份时，PermaBox 会在提交归属或标记写层已释放前核对目录身份。发现不匹配时会保留记录以便排查。即使目录通过其他路径可见，GC 也会保护记录指向的目录。回收审批只适用于同一存储目录和释放标记。最终删除会校验设备号和 inode，并在遇到挂载边界时停止。旧凭据缺少设备号的回收目录会保留，供管理员核查。
 
 用 `containerd --version` 确认版本，并确认 kubelet 使用的 containerd 实例及其实际配置文件（通常是 `/etc/containerd/config.toml`）。备份该文件，按实际配置格式合并下面一个片段中的 `permabox` 表及 `options` 子表；保留已有的 CRI、镜像、快照器及默认运行时设置，顶层 `version` 只写一次。
 
@@ -149,13 +167,17 @@ sudo crictl info
 
 ## 定期回收（GC）
 
+GC 删除已进入回收目录的写层时会分批读取目录条目，并在进入每个目录前检查挂载身份。
+
 默认 `gc_idle_ttl: "0s"` 保留已释放的持久化数据，周期 GC 仍会重试能够安全确认的残留清理。若设为正的 Go 时长（如 `"72h"`），从最后一次确认写层已释放时开始计算空闲时间；达到时长后，下一次符合条件的 GC 才会删除数据。在到期前，同一节点、同一存储根、同一命名空间和 Pod 名的替换实例仍可恢复原写层。GC 会保留没有生命周期标记的旧数据，直到后续成功使用并释放；对仍活跃、可能仍挂载或状态无法确认的记录和数据会保守跳过。共享存储不受支持。
 
-StatefulSet 删除和缩到 0 的回收默认关闭。开启后，删除可在下一次符合条件的扫描回收已释放写层；缩到 0 则至少要等首次批准一分钟，并在后续扫描中按工作负载逐组复核。批准过期或写层已复用时，本次不会退休该写层。最终 API 检查和节点磁盘操作无法原子执行。空闲 TTL 是独立策略。手动部署即使关闭回收也需要元数据桥接来核验身份。将 `workload_socket` 设为桥接 socket 的宿主机绝对路径，目录权限设为 `0700`；桥接的 ServiceAccount 只需要 Pod 和 StatefulSet 的 `get` 权限。[K3s Helm 安装器](k3s/README-cn.md)会自动部署桥接。
+StatefulSet 删除和缩到 0 的回收默认关闭。开启后，删除可在下一次符合条件的扫描回收已释放写层；缩到 0 则至少要等首次批准一分钟，并在后续扫描中按工作负载逐组复核。批准过期或写层已复用时，本次不会退休该写层。若扩容发生在最终 API 检查与磁盘操作之间，已释放写层仍可能丢失。若需保留缩到 0 后的数据，请保持 `gc_on_scale_to_zero` 关闭，并避免通过工作负载注解启用。空闲 TTL 是独立策略。手动部署即使关闭回收也需要元数据桥接来核验身份。将 `workload_socket` 设为桥接 socket 的宿主机绝对路径。socket 目录须由 root 所有，权限设为 `0700`，路径中不能有符号链接。桥接和运行时须使用相同的有效 UID，客户端会在使用元数据前检查 socket 所有者和服务端 UID。桥接的 ServiceAccount 只需要 Pod 和 StatefulSet 的 `get` 权限。[K3s Helm 安装器](k3s/README-cn.md)会自动部署桥接。
 
 节点重启后，若写层最近一次启动已确认，且无日志或挂载引用，GC 可以恢复释放记录。仅丢失运行时日志不足以认定写层已释放。最近一次启动未确认时，只有从未确认使用、已记录释放且 `upper` 为空的写层才可按 TTL 回收。已有数据或来源不明的写层会保留；中断的删除可用写层目录之外的凭据继续清理。
 
 同一个 API 桥也支持 Pod 模板注解覆盖，节点设置 `gc_workload_annotations: true` 即可启用；[注解示例](k3s/README-cn.md#按工作负载覆盖回收策略)与 Helm 部署相同。
+
+如需对现有已释放写层关闭两项工作负载回收策略，请在每个运行 GC 的节点上将 `gc_on_workload_delete`、`gc_on_scale_to_zero` 和 `gc_workload_annotations` 都设为 `false`。已经移入回收目录的写层仍可能被删除。如需长期保留已释放写层，还应设置 `gc_idle_ttl: "0s"`。
 
 在每个手动部署的节点上，用下列 systemd 单元定期执行 `gc`。服务须以 root 运行，并与运行时使用相同的配置、环境覆盖和挂载命名空间。示例适用于使用默认配置、未隔离挂载命名空间的 containerd；如果 runtime shim 使用独立的挂载命名空间，请在其所在命名空间运行 GC。
 
@@ -206,6 +228,8 @@ sudo /usr/local/bin/permabox --root "$RUNTIME_STATE_ROOT" delete --force "$OLD_C
 先将变量设置为该 shim 实际使用的值。清理成功后，确认记录和临时 lower 挂载均已移除，再恢复工作负载。跨挂载命名空间的清理会拒绝执行；应从原命名空间检查，或在节点维护期间核实原命名空间与相关挂载已经释放。不要通过手动删除状态文件绕过仍在使用的写层。
 
 ## 安全范围与镜像升级
+
+应用安全更新时，请固定新镜像的摘要，并在恢复应用数据前确认新容器使用干净的写层。可通过存储别名指定尚未使用的本地存储根目录，让 StatefulSet 保留原名称并使用新写层。按备份和保留策略保存旧写层，以备回滚。
 
 - 包装器在宿主机执行挂载，须由节点管理员安装和管理。示例容器为非特权容器；为了在 `/` 和 `/etc` 进行验证，示例以 UID 0 运行，因此不满足要求非 root 的 Restricted Pod Security 策略。只在授权的测试命名空间使用，不要放宽整个集群的准入策略。
 - 仅授权受信任的工作负载使用该 RuntimeClass 和持久化注解，可用准入策略限制其使用范围。启用 Node authorizer 与 NodeRestriction 时，示例的标签键可防止 kubelet 自行给节点设置该标签。PermaBox 在复用写层前核验 StatefulSet 身份；仍应限制节点数据访问，并备份和归档。根文件系统之外的卷、Secret 投影和 `/proc` 等挂载由各自的机制管理。

@@ -20,8 +20,8 @@ func TestCRIOInvocation(t *testing.T) {
 		{"--root /run/runc --systemd-cgroup state", Invocation{"state", id, ""}},
 		{"--root=/run/runc exec --pid-file /pid --process /process.json --detach", Invocation{"exec", id, ""}},
 	} {
-		if got := Parse(append(strings.Fields(tc.args), id)); got != tc.want {
-			t.Errorf("Parse(%q) = %+v, want %+v", tc.args, got, tc.want)
+		if got, err := Parse(append(strings.Fields(tc.args), id)); err != nil || got != tc.want {
+			t.Errorf("Parse(%q) = %+v, %v; want %+v", tc.args, got, err, tc.want)
 		}
 	}
 }

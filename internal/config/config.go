@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -12,6 +13,8 @@ import (
 	"time"
 
 	"go.yaml.in/yaml/v3"
+
+	"github.com/yijiangchengming/permabox/internal/trustedpath"
 )
 
 const (
@@ -21,6 +24,7 @@ const (
 )
 
 type Config struct {
+	StateDir              string            `yaml:"state_dir"`
 	StorageRoot           string            `yaml:"storage_root"`
 	Runtime               string            `yaml:"underlying_runtime"`
 	LogFile               string            `yaml:"log_file"`
@@ -39,7 +43,7 @@ var aliasPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,62}$`)
 var namespacePattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
 func Load() (Config, error) {
-	cfg := Config{StorageRoot: "/var/lib/permabox/storage", Runtime: "/usr/bin/runc", LogFile: DefaultLog, Annotation: "permabox.io/persist"}
+	cfg := Config{StateDir: StateDir, StorageRoot: "/var/lib/permabox/storage", Runtime: "/usr/bin/runc", LogFile: DefaultLog, Annotation: "permabox.io/persist"}
 	path := os.Getenv("PERMABOX_CONFIG")
 	optional := path == ""
 	if optional {
@@ -70,6 +74,9 @@ func Load() (Config, error) {
 	}
 	if cfg.GCIdleTTL < 0 {
 		return cfg, errors.New("gc_idle_ttl must not be negative")
+	}
+	if !validPath(cfg.StateDir) || filepath.Clean(cfg.StateDir) != cfg.StateDir {
+		return cfg, errors.New("state_dir must be a clean absolute path")
 	}
 	if cfg.WorkloadSocket != "" && (!validPath(cfg.WorkloadSocket) || filepath.Clean(cfg.WorkloadSocket) != cfg.WorkloadSocket) {
 		return cfg, errors.New("workload_socket must be a clean absolute path")
@@ -118,12 +125,27 @@ func (c Config) AllStorageRoots() []string {
 }
 
 func read(path string, cfg *Config) error {
-	f, err := os.Open(path)
+	const maxSize = 1 << 20
+	if !filepath.IsAbs(path) {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return err
+		}
+		path = cwd + string(os.PathSeparator) + path
+	}
+	f, err := trustedpath.OpenRegularFile(path)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	dec := yaml.NewDecoder(f)
+	data, err := io.ReadAll(io.LimitReader(f, maxSize+1))
+	if err != nil {
+		return err
+	}
+	if len(data) > maxSize {
+		return errors.New("node configuration exceeds 1 MiB")
+	}
+	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
 	if err := dec.Decode(cfg); err != nil {
 		if err == io.EOF {

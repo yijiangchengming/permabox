@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 )
@@ -43,6 +44,93 @@ func TestLifecycle(t *testing.T) {
 	}
 }
 
+func TestPrepareRejectsSymlinkedStorageSlot(t *testing.T) {
+	m, sys, root, slot := fixture(t)
+	mkdir(t, filepath.Dir(slot))
+	outside := t.TempDir()
+	if err := os.Symlink(outside, slot); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Prepare("id", root, slot, "app"); err == nil {
+		t.Error("accepted a symlinked storage slot")
+	}
+	entries, err := os.ReadDir(outside)
+	if err != nil || len(entries) != 0 || len(sys.table) != 1 {
+		t.Fatalf("prepare changed external directory or mounts: %v, %v, %v", entries, err, sys.table)
+	}
+}
+
+func TestPrepareRejectsWritableWorkDirectory(t *testing.T) {
+	m, _, root, slot := fixture(t)
+	work := filepath.Join(slot, "work")
+	mkdir(t, work)
+	if err := os.Chmod(work, 0777); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Prepare("id", root, slot, "app"); err == nil {
+		t.Fatal("accepted a writable OverlayFS work directory")
+	}
+}
+
+func TestPrepareRejectsAliasedLiveSlot(t *testing.T) {
+	m, _, root, slot := fixture(t)
+	mkdir(t, m.Dir)
+	mkdir(t, slot)
+	alias := filepath.Join(t.TempDir(), "old-slot")
+	if err := os.Symlink(slot, alias); err != nil {
+		t.Fatal(err)
+	}
+	previous := record{Namespace: "mnt:[1]", Root: filepath.Join(filepath.Dir(root), "old-root"), Slot: alias}
+	if err := writeRecord(m.journal("previous"), previous); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Prepare("replacement", root, slot, "app"); err == nil {
+		t.Fatal("accepted a second journal for the same storage directory")
+	}
+	assertMissing(t, filepath.Join(slot, "container.json"))
+	assertMissing(t, m.journal("replacement"))
+}
+
+func TestPrepareReusesLargeContainerMarker(t *testing.T) {
+	m, _, root, slot := fixture(t)
+	mkdir(t, slot)
+	name := strings.Repeat("a", 4096)
+	if err := writeRecord(filepath.Join(slot, "container.json"), name); err != nil {
+		t.Fatal(err)
+	}
+	if owned, err := ownedSlot(slot); err != nil || !owned {
+		t.Errorf("legacy slot ownership = %v, %v", owned, err)
+	}
+	if _, err := m.Prepare("id", root, slot, name); err != nil {
+		t.Fatalf("reuse legacy slot: %v", err)
+	}
+}
+
+func TestPrepareRetryChecksOtherLiveSlots(t *testing.T) {
+	m, _, root, slot := fixture(t)
+	if _, err := m.Prepare("original", root, slot, "app"); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(t.TempDir(), "old-slot")
+	if err := os.Symlink(slot, alias); err != nil {
+		t.Fatal(err)
+	}
+	other := record{Namespace: "mnt:[1]", Root: filepath.Join(filepath.Dir(root), "old-root"), Slot: alias}
+	if err := writeRecord(m.journal("other"), other); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(slot, releasedMarker)
+	if err := os.WriteFile(marker, []byte("preserve"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Prepare("original", root, slot, "app"); err == nil {
+		t.Fatal("retried a container with a conflicting storage journal")
+	}
+	if data, err := os.ReadFile(marker); err != nil || string(data) != "preserve" {
+		t.Fatalf("release marker changed: %q, %v", data, err)
+	}
+}
+
 func TestCleanupRetainsBusyMount(t *testing.T) {
 	m, sys, root, slot := fixture(t)
 	if _, err := m.Prepare("id", root, slot, "app"); err != nil {
@@ -54,6 +142,27 @@ func TestCleanupRetainsBusyMount(t *testing.T) {
 	}
 	if live, err := m.Managed("id"); !live || err != nil || len(sys.table) != 3 || sys.detached {
 		t.Fatalf("busy cleanup changed the journal or mounts: %v %v %+v", live, err, sys)
+	}
+}
+
+func TestCleanupRejectsReplacedStorageSlot(t *testing.T) {
+	m, _, root, slot := fixture(t)
+	if _, err := m.Prepare("id", root, slot, "app"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(slot, slot+"-original"); err != nil {
+		t.Fatal(err)
+	}
+	mkdir(t, slot)
+	if err := writeRecord(filepath.Join(slot, "container.json"), "app"); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Cleanup("id"); err == nil {
+		t.Fatal("accepted a replacement storage directory")
+	}
+	assertMissing(t, filepath.Join(slot, releasedMarker))
+	if _, err := os.Stat(m.journal("id")); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -120,6 +229,8 @@ func fixture(t *testing.T) (Manager, *fakeSystem, string, string) {
 	sys := &fakeSystem{table: []entry{{ID: 1, Target: root, Kind: "overlay"}}}
 	return Manager{Dir: filepath.Join(base, "state"), sys: sys}, sys, root, filepath.Join(base, "store", "namespace", "pod")
 }
+
+func (m Manager) journal(id string) string { return filepath.Join(m.Dir, id+".json") }
 
 type fakeSystem struct {
 	table                []entry
