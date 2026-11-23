@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/yijiangchengming/permabox/internal/ownership"
@@ -18,7 +19,7 @@ func TestPodAnnotationsOverrideWorkloadDefaults(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/v1/namespaces/test/pods/pod":
-			fmt.Fprint(w, `{"metadata":{"uid":"pod-id","annotations":{"permabox.io/gc-on-workload-delete":"true","permabox.io/gc-on-scale-to-zero":"false","other":"private"},"ownerReferences":[{"apiVersion":"apps/v1","kind":"StatefulSet","name":"app","uid":"app-id","controller":true}]}}`)
+			fmt.Fprint(w, `{"metadata":{"uid":"pod-id","annotations":{"permabox.io/gc-on-workload-delete":"true","permabox.io/gc-on-scale-to-zero":"false","permabox.io/persist-exclude":"/tmp,/var/cache","other":"private"},"ownerReferences":[{"apiVersion":"apps/v1","kind":"StatefulSet","name":"app","uid":"app-id","controller":true}]}}`)
 		case "/apis/apps/v1/namespaces/test/statefulsets/app":
 			fmt.Fprint(w, `{"metadata":{"uid":"app-id"}}`)
 		default:
@@ -34,6 +35,9 @@ func TestPodAnnotationsOverrideWorkloadDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if !reflect.DeepEqual(owner.Excludes, []string{"/tmp", "/var/cache"}) {
+		t.Fatalf("persist exclusions = %#v", owner.Excludes)
+	}
 	data, err := json.Marshal(owner)
 	if err != nil {
 		t.Fatal(err)
@@ -46,7 +50,7 @@ func TestPodAnnotationsOverrideWorkloadDefaults(t *testing.T) {
 		t.Fatalf("round-tripped overrides: delete=%v, zero=%v", del, zero)
 	}
 	obj, err := client.get(context.Background(), "Pod", "test", "pod")
-	if err != nil || len(obj.Metadata.Annotations) != 2 {
+	if err != nil || len(obj.Metadata.Annotations) != 3 || obj.Metadata.Annotations[persistExcludeAnnotation] != "/tmp,/var/cache" {
 		t.Fatalf("bridge exposed unexpected metadata: %+v, %v", obj.Metadata.Annotations, err)
 	}
 	if del, zero := ApplyOverrides(readOverrides(map[string]string{scaleToZeroAnnotation: ""}), true, true); !del || zero {
@@ -160,7 +164,8 @@ func TestResolveStatefulSetOwner(t *testing.T) {
 			c := Client{base: server.URL, http: server.Client()}
 			got, err := c.Resolve(context.Background(), "test", "pod", tc.uid)
 			wantError := tc.name == "replaced statefulset"
-			if (err != nil) != wantError || got.Kind != tc.kind || (tc.kind != "" && got != (ownership.Owner{Namespace: "test", Kind: tc.kind, Name: "app", UID: "app-id"})) {
+			want := ownership.Owner{Namespace: "test", Kind: tc.kind, Name: "app", UID: "app-id"}
+			if (err != nil) != wantError || got.Kind != tc.kind || (tc.kind != "" && !reflect.DeepEqual(got, want)) {
 				t.Fatalf("owner = %+v, %v", got, err)
 			}
 		})

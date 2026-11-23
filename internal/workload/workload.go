@@ -13,8 +13,9 @@ import (
 )
 
 const (
-	deleteAnnotation      = "permabox.io/gc-on-workload-delete"
-	scaleToZeroAnnotation = "permabox.io/gc-on-scale-to-zero"
+	deleteAnnotation         = "permabox.io/gc-on-workload-delete"
+	scaleToZeroAnnotation    = "permabox.io/gc-on-scale-to-zero"
+	persistExcludeAnnotation = "permabox.io/persist-exclude"
 )
 
 func readOverrides(annotations map[string]string) ownership.Overrides {
@@ -157,8 +158,12 @@ func (c Client) Resolve(ctx context.Context, namespace, pod, uid string) (owners
 	if set.Metadata.UID != ref.UID || set.Metadata.DeletionTimestamp != nil {
 		return ownership.Owner{}, errors.New("Pod refers to a replaced or terminating StatefulSet")
 	}
+	exclusions, err := ownership.ParseExclusions(obj.Metadata.Annotations[persistExcludeAnnotation])
+	if err != nil {
+		return ownership.Owner{}, err
+	}
 	return ownership.Owner{Namespace: namespace, Kind: ref.Kind, Name: ref.Name, UID: ref.UID,
-		Overrides: readOverrides(obj.Metadata.Annotations)}, nil
+		Overrides: readOverrides(obj.Metadata.Annotations), Excludes: exclusions}, nil
 }
 
 type ReclaimReason uint8

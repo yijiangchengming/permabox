@@ -30,20 +30,27 @@ type lockedManager struct {
 func New(dir string) Manager { return Manager{Dir: dir, sys: linux{}} }
 
 type record struct {
-	Namespace     string           `json:"mount_namespace"`
-	Root          string           `json:"root"`
-	Source        string           `json:"source,omitempty"`
-	ConfigRoot    string           `json:"config_root,omitempty"`
-	Bundle        string           `json:"bundle,omitempty"`
-	SourceID      int              `json:"source_mount_id,omitempty"`
-	ConfigPending bool             `json:"config_redirect_pending,omitempty"`
-	Slot          string           `json:"slot"`
-	SlotIdentity  *slotIdentity    `json:"slot_identity,omitempty"`
-	LowerID       int              `json:"lower_mount_id,omitempty"`
-	OverlayID     int              `json:"overlay_mount_id,omitempty"`
-	ReleasedAt    time.Time        `json:"released_at,omitempty"`
-	PendingOwner  *ownership.Owner `json:"pending_workload_owner,omitempty"`
-	Started       bool             `json:"ownership_commit_pending,omitempty"`
+	Namespace       string           `json:"mount_namespace"`
+	Root            string           `json:"root"`
+	Source          string           `json:"source,omitempty"`
+	ConfigRoot      string           `json:"config_root,omitempty"`
+	Bundle          string           `json:"bundle,omitempty"`
+	SourceID        int              `json:"source_mount_id,omitempty"`
+	ConfigPending   bool             `json:"config_redirect_pending,omitempty"`
+	Slot            string           `json:"slot"`
+	SlotIdentity    *slotIdentity    `json:"slot_identity,omitempty"`
+	LowerID         int              `json:"lower_mount_id,omitempty"`
+	OverlayID       int              `json:"overlay_mount_id,omitempty"`
+	ReleasedAt      time.Time        `json:"released_at,omitempty"`
+	PendingOwner    *ownership.Owner `json:"pending_workload_owner,omitempty"`
+	ExclusionMounts []exclusionMount `json:"exclusion_mounts,omitempty"`
+	Started         bool             `json:"ownership_commit_pending,omitempty"`
+}
+
+type exclusionMount struct {
+	Path    string `json:"path"`
+	Scratch string `json:"scratch"`
+	MountID int    `json:"mount_id,omitempty"`
 }
 
 type slotIdentity struct {
@@ -103,6 +110,13 @@ func (m Manager) prepare(id, root, bundle, configRoot, slot, container string, o
 	if len(containerRecord) > maxContainerRecordSize {
 		return false, errors.New("encoded container name exceeds the storage marker limit")
 	}
+	encodedOwner, err := json.Marshal(owner)
+	if err != nil {
+		return false, err
+	}
+	if len(encodedOwner) > maxMountRecordSize {
+		return false, errors.New("persistence metadata exceeds the mount record limit")
+	}
 	inputRoot := root
 	root, err = filepath.EvalSymlinks(root)
 	if err != nil {
@@ -114,6 +128,14 @@ func (m Manager) prepare(id, root, bundle, configRoot, slot, container string, o
 	}
 	if !info.IsDir() || !filepath.IsAbs(root) || !filepath.IsAbs(slot) || overlap(root, slot) || overlap(root, m.Dir) || overlap(slot, m.Dir) {
 		return false, errors.New("rootfs, storage slot and state directory must be separate absolute directories")
+	}
+	exclusions, err := resolveExclusionDirectories(root, owner.Excludes)
+	if err != nil {
+		return false, err
+	}
+	owner.Excludes = make([]string, len(exclusions))
+	for i, path := range exclusions {
+		owner.Excludes[i] = string(filepath.Separator) + path
 	}
 	lock, err := m.lock(true)
 	if err != nil {
@@ -158,12 +180,16 @@ func (m Manager) prepare(id, root, bundle, configRoot, slot, container string, o
 		return false, err
 	}
 	identity := storageIdentity(slotInfo)
-	want := record{Namespace: ns, Root: root, Source: source, Bundle: bundle, ConfigRoot: configRoot, SourceID: sourceID, Slot: slot, SlotIdentity: &identity, PendingOwner: &owner}
+	exclusionMounts := make([]exclusionMount, len(exclusions))
+	for i, path := range exclusions {
+		exclusionMounts[i] = exclusionMount{Path: path, Scratch: filepath.Join(m.Dir, id+".exclude-"+exclusionHash(path))}
+	}
+	want := record{Namespace: ns, Root: root, Source: source, Bundle: bundle, ConfigRoot: configRoot, SourceID: sourceID, Slot: slot, SlotIdentity: &identity, PendingOwner: &owner, ExclusionMounts: exclusionMounts}
 	encodedWant, err := json.Marshal(want)
 	if err != nil {
 		return false, err
 	}
-	if len(encodedWant) > maxMountRecordSize {
+	if len(encodedWant)+len(exclusionMounts)*32 > maxMountRecordSize {
 		return false, errors.New("persistence metadata exceeds the mount record limit")
 	}
 	prev, err := readRecord(lock.journal(id))
@@ -239,6 +265,17 @@ func (m Manager) prepare(id, root, bundle, configRoot, slot, container string, o
 			}
 			if lower == 0 || lower != prev.LowerID || (sourceID == 0 && !sameFile(source, alias)) {
 				return false, errors.New("previous create is missing its original lower bind mount")
+			}
+		}
+		if !sameExclusionPaths(prev.ExclusionMounts, exclusions) {
+			return false, errors.New("container retry has different persistent directory exclusions")
+		}
+		for _, exclusion := range prev.ExclusionMounts {
+			if id, err := findExclusionOverlay(mounts, prev, alias, exclusion); err != nil || id == 0 {
+				if err != nil {
+					return false, err
+				}
+				return false, errors.New("previous create is missing a temporary exclusion overlay")
 			}
 		}
 		if err := bindSlotOwner(slot, owner); err != nil {
@@ -351,7 +388,10 @@ func (m lockedManager) commitSlotOwnership(id string, state record, slot string)
 	if !state.Started || state.PendingOwner == nil || !state.PendingOwner.Valid() {
 		return nil
 	}
-	if err := confirmSlotUse(slot, id, *state.PendingOwner); err != nil {
+	owner := *state.PendingOwner
+	owner.Overrides = ownership.Overrides{}
+	owner.Excludes = nil
+	if err := confirmSlotUse(slot, id, owner); err != nil {
 		return err
 	}
 	state.Started = false
@@ -360,6 +400,14 @@ func (m lockedManager) commitSlotOwnership(id string, state record, slot string)
 }
 
 func (m lockedManager) install(id string, state *record) error {
+	imageDirectories := make([]os.FileInfo, len(state.ExclusionMounts))
+	for i, exclusion := range state.ExclusionMounts {
+		info, err := os.Stat(filepath.Join(state.lowerSource(), exclusion.Path))
+		if err != nil {
+			return err
+		}
+		imageDirectories[i] = info
+	}
 	alias := m.alias(id)
 	if err := os.Mkdir(alias, 0700); err != nil {
 		return err
@@ -412,11 +460,89 @@ func (m lockedManager) install(id string, state *record) error {
 	if state.OverlayID == 0 {
 		return errors.New("could not find writable overlay in mountinfo")
 	}
+	if err := writeRecord(m.journal(id), state); err != nil {
+		return err
+	}
+	if state.PendingOwner != nil {
+		for i := range state.ExclusionMounts {
+			if err := m.installExclusion(id, state, alias, i, imageDirectories[i]); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func sameExclusionPaths(mounts []exclusionMount, paths []string) bool {
+	if len(mounts) != len(paths) {
+		return false
+	}
+	for i, path := range paths {
+		if mounts[i].Path != path {
+			return false
+		}
+	}
+	return true
+}
+
+func (m lockedManager) installExclusion(id string, state *record, alias string, index int, imageDirectory os.FileInfo) error {
+	item := state.ExclusionMounts[index]
+	path := item.Path
+	if strings.ContainsAny(item.Scratch+filepath.Join(state.Root, path)+filepath.Join(alias, path), ",:\\\n\r\t\x00") {
+		return errors.New("exclusion paths contain characters unsupported by OverlayFS mount options")
+	}
+	target := filepath.Join(state.Root, path)
+	if err := realDir(target); err != nil {
+		return fmt.Errorf("exclusion target %s is not a real directory in the writable rootfs: %w", target, err)
+	}
+	if err := createExclusionScratch(item.Scratch, imageDirectory); err != nil {
+		return err
+	}
+	if err := m.sys.mount("overlay", target, "overlay", 0, exclusionOverlayOptions(alias, item)); err != nil {
+		return fmt.Errorf("mount temporary exclusion overlay at %s: %w", target, err)
+	}
+	if err := m.sys.mount("", target, "", syscall.MS_PRIVATE, ""); err != nil {
+		return fmt.Errorf("make temporary exclusion overlay private at %s: %w", target, err)
+	}
+	mounts, err := m.sys.mounts()
+	if err != nil {
+		return err
+	}
+	item.MountID, err = findExclusionOverlay(mounts, *state, alias, item)
+	if err != nil {
+		return err
+	}
+	if item.MountID == 0 {
+		return errors.New("could not find temporary exclusion overlay mount")
+	}
+	state.ExclusionMounts[index] = item
 	return writeRecord(m.journal(id), state)
 }
 
 func overlayOptions(state record, alias string) string {
 	return "lowerdir=" + alias + ",upperdir=" + filepath.Join(state.Slot, "upper") + ",workdir=" + filepath.Join(state.Slot, "work")
+}
+
+func findExclusionOverlay(mounts []entry, state record, alias string, item exclusionMount) (int, error) {
+	target := filepath.Join(state.Root, item.Path)
+	expected := exclusionOverlayLayers(alias, item)
+	found := 0
+	for _, mount := range mounts {
+		if mount.Target != target {
+			continue
+		}
+		if mount.Kind != "overlay" || !hasLayers(mount.Options, expected) {
+			return 0, fmt.Errorf("unexpected mount %d (%s, %s) covers excluded directory %s; expected %s", mount.ID, mount.Kind, mount.Options, target, expected)
+		}
+		if found != 0 {
+			return 0, fmt.Errorf("multiple temporary overlays cover excluded directory %s", target)
+		}
+		if item.MountID != 0 && item.MountID != mount.ID {
+			return 0, fmt.Errorf("exclusion overlay mount %d does not match recorded mount %d", mount.ID, item.MountID)
+		}
+		found = mount.ID
+	}
+	return found, nil
 }
 
 func prepareSlot(dir *os.File, container string, containerRecord []byte, root os.FileInfo) error {
@@ -607,6 +733,36 @@ func (m lockedManager) cleanupLockedAt(id string, state record, now time.Time) e
 			}
 		}
 	}
+	for i := len(state.ExclusionMounts) - 1; i >= 0; i-- {
+		exclusion := state.ExclusionMounts[i]
+		target := filepath.Join(state.Root, exclusion.Path)
+		id, err := findExclusionOverlay(mounts, state, alias, exclusion)
+		if err != nil {
+			return err
+		}
+		if id != 0 {
+			if err := realDir(target); err != nil {
+				return fmt.Errorf("unsafe exclusion mount target %s: %w", target, err)
+			}
+			if err := m.sys.unmount(target, 0); err != nil {
+				return fmt.Errorf("unmount temporary exclusion overlay at %s: %w", target, err)
+			}
+		}
+	}
+	if len(state.ExclusionMounts) > 0 {
+		mounts, err = m.sys.mounts()
+		if err != nil {
+			return err
+		}
+		for _, exclusion := range state.ExclusionMounts {
+			if mountReferences(mounts, exclusion.Scratch) {
+				return fmt.Errorf("temporary exclusion storage %s is still referenced by a mount", exclusion.Scratch)
+			}
+			if err := removeExclusionScratch(m.Dir, id, exclusion); err != nil {
+				return err
+			}
+		}
+	}
 	if own != 0 {
 		if err := m.sys.unmount(state.Root, 0); err != nil {
 			return fmt.Errorf("unmount writable overlay: %w", err)
@@ -744,6 +900,18 @@ func readRecord(path string) (record, error) {
 			filepath.Clean(out.Source) != out.Source || filepath.Clean(out.Bundle) != out.Bundle ||
 			overlap(out.Source, out.Root) || overlap(out.Bundle, out.Root) || within(out.Source, out.Bundle) {
 			return out, fmt.Errorf("invalid redirected rootfs record %s", path)
+		}
+	}
+	for i, exclusion := range out.ExclusionMounts {
+		if !filepath.IsLocal(exclusion.Path) || filepath.Clean(exclusion.Path) != exclusion.Path || exclusion.Path == "." ||
+			strings.ContainsAny(exclusion.Path, ",:\\\n\r\t\x00") || !filepath.IsAbs(exclusion.Scratch) ||
+			filepath.Clean(exclusion.Scratch) != exclusion.Scratch || exclusion.MountID < 0 {
+			return out, fmt.Errorf("invalid exclusion mount record %s", path)
+		}
+		for _, prior := range out.ExclusionMounts[:i] {
+			if overlap(prior.Path, exclusion.Path) {
+				return out, fmt.Errorf("overlapping exclusion mount records %s", path)
+			}
 		}
 	}
 	return out, nil

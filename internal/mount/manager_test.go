@@ -7,6 +7,8 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+
+	"github.com/yijiangchengming/permabox/internal/ownership"
 )
 
 func TestLifecycle(t *testing.T) {
@@ -69,6 +71,17 @@ func TestPrepareRejectsWritableWorkDirectory(t *testing.T) {
 	}
 	if _, err := m.Prepare("id", root, slot, "app"); err == nil {
 		t.Fatal("accepted a writable OverlayFS work directory")
+	}
+}
+
+func TestPrepareRejectsOversizedOwnerMetadataBeforeWritingSlot(t *testing.T) {
+	m, _, root, slot := fixture(t)
+	owner := ownership.Owner{Namespace: "namespace", Kind: "StatefulSet", Name: "pod", UID: "uid", Excludes: []string{"/" + strings.Repeat("x", maxMountRecordSize)}}
+	if _, err := m.PrepareOwned("id", root, slot, "app", owner); err == nil {
+		t.Fatal("accepted owner metadata larger than the mount record limit")
+	}
+	if _, err := os.Stat(slot); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("created writable-layer slot: %v", err)
 	}
 }
 
@@ -233,10 +246,10 @@ func fixture(t *testing.T) (Manager, *fakeSystem, string, string) {
 func (m Manager) journal(id string) string { return filepath.Join(m.Dir, id+".json") }
 
 type fakeSystem struct {
-	table                []entry
-	fail, busy, detached bool
-	busyTarget           string
-	serial               int
+	table                                      []entry
+	fail, failAfterRootOverlay, busy, detached bool
+	busyTarget                                 string
+	serial                                     int
 }
 
 func (*fakeSystem) namespace() (string, error) { return "mnt:[1]", nil }
@@ -246,6 +259,9 @@ func (f *fakeSystem) mount(source, target, kind string, flags uintptr, opts stri
 		return nil
 	}
 	if f.fail && kind == "overlay" {
+		return errors.New("overlay failed")
+	}
+	if f.failAfterRootOverlay && kind == "overlay" && len(f.table) > 0 && target != f.table[0].Target {
 		return errors.New("overlay failed")
 	}
 	f.serial++

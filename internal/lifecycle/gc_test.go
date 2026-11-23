@@ -51,7 +51,7 @@ func TestSweepWorkloadsRechecksEligibilityBeforeRetirement(t *testing.T) {
 	slot := writeGCSlot(t, store, "app-0", owner, now)
 	calls := 0
 	err := sweepWorkloads(manager, []string{store}, "", 0, now, func(_ context.Context, got ownership.Owner) (reclaimDecision, error) {
-		if got != owner {
+		if !reflect.DeepEqual(got, owner) {
 			t.Fatalf("owner = %+v; want %+v", got, owner)
 		}
 		calls++

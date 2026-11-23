@@ -78,6 +78,8 @@ underlying_runtimes:
 
 `pod_annotations` 是从 Pod 转发到 OCI spec 的键白名单。如果更改 `persist_annotation`，同步修改白名单和 StatefulSet 的 Pod 模板注解；启用值仍为字符串 `"true"`。PermaBox 跳过 CRI sandbox，只为符合条件的业务容器挂载持久化层。建议使用示例中的固定注解 `permabox.io/container: demo` 指定单个容器名；如 Pod 内有多个容器，不要让它们共用以命名空间和 Pod 名为键的可写层。
 
+如需让指定目录不跨 Pod 重建保留，可在 Pod 模板添加 `permabox.io/persist-exclude`，值为以逗号分隔的规范绝对路径，例如 `/tmp,/var/cache`。每个路径必须对应镜像中已存在的目录，并且在可写 rootfs 中也是实际目录。拒绝 `/`、逗号、`.` 或 `..` 路径段以及互相重叠的路径。PermaBox 会为每个目录挂载临时 OverlayFS，镜像中的内容（包括特殊文件）仍可见，运行期间的写入则只进入临时层。该注解由工作负载桥接从 Pod 元数据读取，无需加入 containerd 的 `pod_annotations` 白名单。设置注解前已持久化的旧目录内容会被隐藏；移除注解后可能重新出现。
+
 在维护窗口内检查配置，再重启并确认 CRI 可用。以下以 systemd 和默认配置路径为例；`crictl` 需指向 kubelet 使用的同一个 CRI 端点。
 
 ```sh

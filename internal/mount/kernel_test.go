@@ -5,6 +5,7 @@ package mount
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"syscall"
 	"testing"
 	"time"
@@ -25,11 +26,18 @@ func TestKernelPersistence(t *testing.T) {
 	m := New(filepath.Join(base, "state"))
 	image := filepath.Join(base, "image")
 	mkdir(t, image)
+	mkdir(t, filepath.Join(image, "ephemeral"))
 	put(t, image, "edited", "from image")
 	put(t, image, "deleted", "image file")
+	put(t, image, "ephemeral/base", "image baseline")
+	if err := syscall.Mkfifo(filepath.Join(image, "ephemeral", "pipe"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	slot := filepath.Join(base, "storage", "default", "app-0")
 	roots := []string{filepath.Dir(filepath.Dir(slot))}
-	owner := ownership.Owner{Namespace: "default", Name: "app", Kind: "StatefulSet", UID: "workload-uid"}
+	owner := ownership.Owner{Namespace: "default", Name: "app", Kind: "StatefulSet", UID: "workload-uid", Excludes: []string{"/ephemeral"}}
+	storedOwner := owner
+	storedOwner.Excludes = nil
 	for _, id := range []string{"first", "replacement"} {
 		func() {
 			bundle := filepath.Join(base, id)
@@ -67,15 +75,20 @@ func TestKernelPersistence(t *testing.T) {
 			if info, err := os.Stat(root); err != nil || info.Mode().Perm() != 0751 {
 				t.Fatalf("rootfs permissions changed after installing upper: %v, %v", info, err)
 			}
+			if info, err := os.Lstat(filepath.Join(root, "ephemeral", "pipe")); err != nil || info.Mode()&os.ModeNamedPipe == 0 {
+				t.Fatalf("excluded FIFO not visible: %v, %v", info, err)
+			}
 			if id == "first" {
 				put(t, root, "edited", "persisted edit")
 				put(t, root, "created", "persisted addition")
+				put(t, root, "ephemeral/base", "ephemeral edit")
 				if err := os.Remove(filepath.Join(root, "deleted")); err != nil {
 					t.Fatal(err)
 				}
 			} else {
 				check(t, root, "edited", "persisted edit")
 				check(t, root, "created", "persisted addition")
+				check(t, root, "ephemeral/base", "image baseline")
 				if _, err := os.Stat(filepath.Join(root, "deleted")); !os.IsNotExist(err) {
 					t.Fatalf("whiteout did not survive: %v", err)
 				}
@@ -86,7 +99,7 @@ func TestKernelPersistence(t *testing.T) {
 			}
 			now := time.Now()
 			candidates, err := m.DiscoverReleased(roots, released, 0, now)
-			if err != nil || len(candidates) != 1 || candidates[0].Owner() != owner {
+			if err != nil || len(candidates) != 1 || !reflect.DeepEqual(candidates[0].Owner(), storedOwner) {
 				t.Fatalf("discover = %+v, %v", candidates, err)
 			}
 			// The first release is kept so its replacement can reuse the layer.
@@ -131,6 +144,11 @@ func TestKernelPersistence(t *testing.T) {
 			t.Fatal(err)
 		}
 		put(t, target, "created", "retained write")
+		put(t, target, "ephemeral/base", "temporary write")
+		state, err := readRecord(m.journal(id))
+		if err != nil || len(state.ExclusionMounts) != 1 {
+			t.Fatalf("temporary mount journal = %+v, %v", state.ExclusionMounts, err)
+		}
 		assertMissing(t, filepath.Join(source, "created"))
 		if err := syscall.Unmount(source, syscall.MNT_DETACH); err != nil {
 			t.Fatal(err)
@@ -142,11 +160,14 @@ func TestKernelPersistence(t *testing.T) {
 		}
 		check(t, target, "edited", "from image")
 		check(t, target, "created", "retained write")
+		check(t, target, "ephemeral/base", "temporary write")
 		if err := m.Cleanup(id); err != nil {
 			t.Fatal(err)
 		}
 		assertMissing(t, target)
 		assertMissing(t, m.alias(id))
+		assertMissing(t, state.ExclusionMounts[0].Scratch)
+		assertMissing(t, filepath.Join(slot, "upper", "ephemeral", "base"))
 		check(t, filepath.Join(slot, "upper"), "created", "retained write")
 	})
 	t.Run("retirement does not cross bind mounts", func(t *testing.T) {

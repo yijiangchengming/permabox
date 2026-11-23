@@ -11,7 +11,7 @@
 | 1.36.4 | 1.36.4 | overlay | runc |
 | 1.37.0 | 1.37.0 | overlay | runc |
 
-矩阵中的每个组合均已通过验证，覆盖 rootfs 持久化、副本隔离、写层回收，以及同一个可写 `hostPath` 的直接挂载和目录 `subPath` 挂载。测试会在 Pod 重建后检查两个卷路径，并确认 PermaBox 回收 rootfs 写层后节点上的卷文件仍然存在。测试还分别执行 CRI `StopContainer` 和 `RemoveContainer`，检查每一步结束后的挂载状态。PVC 和 CSI 后端、只读挂载、挂载传播、`subPathExpr`、检查点和恢复、其他 OCI 运行时、用户命名空间、SELinux enforcing 和 OpenShift 均在矩阵范围之外。[测试脚本](smoke_test.sh)
+矩阵中的每个组合均已通过验证，覆盖 rootfs 持久化、副本隔离、写层回收，以及同一个可写 `hostPath` 的直接挂载和目录 `subPath` 挂载。测试会在 Pod 重建后检查两个卷路径，并确认 PermaBox 回收 rootfs 写层后节点上的卷文件仍然存在。测试还分别执行 CRI `StopContainer` 和 `RemoveContainer`，检查每一步结束后的挂载状态。PVC 和 CSI 后端、只读挂载、挂载传播、`subPathExpr`、检查点和恢复、其他 OCI 运行时、用户命名空间、SELinux enforcing 和 OpenShift 均在矩阵范围之外。工作流还验证排除目录中的写入在 Pod 重建后消失，镜像文件重新可见。[测试脚本](smoke_test.sh)
 
 使用 CRI-O 原生 `overlay` 驱动时，PermaBox 将容器 rootfs 挂载到 `<state_dir>/<container-id>.rootfs`，并更新运行时 OCI bundle 的 `root.path`。CRI-O 在 `StopContainer` 时可以卸载并替换自己的 `merged` 目录，PermaBox 在 OCI `delete` 后清理独立 rootfs 和 lower 绑定。持久化写层使用 `<storage_root>/<namespace>/<pod-name>/upper`。
 
