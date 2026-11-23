@@ -73,9 +73,16 @@ func (m Manager) overlaySourceID(source string) (int, error) {
 	return id, nil
 }
 
+func (r record) originalConfigRoot() string {
+	if r.ConfigRoot != "" {
+		return r.ConfigRoot
+	}
+	return r.Source
+}
+
 func (m lockedManager) publishBundleRoot(id string, state *record) error {
 	if state.ConfigPending {
-		_, err := oci.ReplaceBundleRoot(state.Bundle, state.Source, state.Root)
+		_, err := oci.ReplaceBundleRoot(state.Bundle, state.originalConfigRoot(), state.Root)
 		return err
 	}
 	state.ConfigPending = true
@@ -83,7 +90,7 @@ func (m lockedManager) publishBundleRoot(id string, state *record) error {
 		state.ConfigPending = false
 		return err
 	}
-	published, err := oci.ReplaceBundleRoot(state.Bundle, state.Source, state.Root)
+	published, err := oci.ReplaceBundleRoot(state.Bundle, state.originalConfigRoot(), state.Root)
 	if err != nil && !published {
 		state.ConfigPending = false
 		return errors.Join(err, writeRecord(m.journal(id), state))

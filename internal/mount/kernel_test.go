@@ -127,7 +127,7 @@ func TestKernelPersistence(t *testing.T) {
 		target := filepath.Join(m.Dir, id+".rootfs")
 		t.Cleanup(func() { _ = syscall.Unmount(target, syscall.MNT_DETACH) })
 		t.Cleanup(func() { _ = syscall.Unmount(m.alias(id), syscall.MNT_DETACH) })
-		if _, err := m.PrepareRedirected(id, source, bundle, slot, "app", owner); err != nil {
+		if _, err := m.PrepareRedirected(id, source, bundle, source, slot, "app", owner, true); err != nil {
 			t.Fatal(err)
 		}
 		put(t, target, "created", "retained write")

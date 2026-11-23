@@ -152,7 +152,8 @@ type BundleOptions struct {
 	Persistence                *Bundle
 	StorageAlias, RuntimeAlias string
 	Namespace                  string
-	RedirectRoot               bool
+	RequireOverlay             bool
+	RootPath                   string
 }
 
 type invalidPersistence struct{ error }
@@ -205,19 +206,20 @@ func InspectBundleWithRoot(bundle, annotation, target, source string) (BundleOpt
 		if name == "" {
 			return options, invalidPersistence{errors.New("CRI-O persistence requires the Kubernetes container name label")}
 		}
-		if target != "" && spec.Root.Path == target {
-			spec.Root.Path = source
-		}
-		options.RedirectRoot = isCRIOOverlayRoot(spec.Root.Path)
-		if !options.RedirectRoot {
-			return options, invalidPersistence{errors.New("CRI-O persistence requires a containers/storage native overlay rootfs")}
-		}
+		options.RequireOverlay = true
 	}
 	if !podPattern.MatchString(ns) || !podPattern.MatchString(pod) {
 		return options, invalidPersistence{errors.New("persistence requires valid Pod namespace and name annotations")}
 	}
 	if spec.Root.Path == "" {
 		return options, invalidPersistence{errors.New("persistence requires OCI root.path")}
+	}
+	options.RootPath = spec.Root.Path
+	if target != "" && spec.Root.Path == target {
+		spec.Root.Path = source
+	}
+	if options.RequireOverlay && !isCRIOOverlayRoot(spec.Root.Path) {
+		return options, invalidPersistence{errors.New("CRI-O persistence requires a containers/storage native overlay rootfs")}
 	}
 	root := spec.Root.Path
 	if !filepath.IsAbs(root) {

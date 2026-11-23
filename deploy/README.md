@@ -29,7 +29,7 @@ For manual deployments with multiple runtime instances on one node, use a separa
 
 PermaBox rejects unsupported OCI commands, unrecognized lifecycle flags, and unreadable or invalid create bundles before invoking the runtime. Check the runtime's OCI command compatibility before upgrading. The state directory must be private and owned by the runtime user. Use trusted ancestors and avoid symlinks in the state path.
 
-Use CRI-managed OCI bundles under trusted directories with no symbolic links in the path. The bundle directory and its regular `config.json` must be writable only by their trusted owners. The config is limited to 4 MiB. Keep the bundle configuration unchanged throughout `create`, since the underlying runtime reads it after PermaBox checks it.
+Use CRI-managed OCI bundles under trusted directories with no symbolic links in the path. The bundle directory and its regular `config.json` must be writable only by their trusted owners. The config is limited to 4 MiB. For persistent containers, PermaBox mounts the merged rootfs at `<state_dir>/<container-id>.rootfs`, updates only OCI `root.path` before handing the bundle to the runtime, and restores the original path during cleanup. Keep the bundle under runtime control throughout this process. The persistent data directory is `<storage_root>/<namespace>/<pod-name>/upper`.
 
 | Environment variable | Purpose |
 | --- | --- |
