@@ -232,8 +232,8 @@ func (c Client) serveMetadata(w http.ResponseWriter, r *http.Request) {
 			annotations := obj.Metadata.Annotations
 			obj.Metadata.Annotations = nil
 			if kind == "Pod" {
-				obj.Metadata.Annotations = make(map[string]string, 2)
-				for _, key := range []string{deleteAnnotation, scaleToZeroAnnotation} {
+				obj.Metadata.Annotations = make(map[string]string, 3)
+				for _, key := range []string{deleteAnnotation, scaleToZeroAnnotation, persistExcludeAnnotation} {
 					if value, ok := annotations[key]; ok {
 						obj.Metadata.Annotations[key] = value
 					}

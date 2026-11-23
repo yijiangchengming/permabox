@@ -141,6 +141,7 @@ k get node "$node" -o json | jq -e --arg kubelet "$version" --arg runtime "cri-o
 '
 # Both RuntimeClasses must be able to exist without sharing a node selector.
 k apply -f deploy/runtimeclass.yaml
+check_exclusions=true
 smoke_lifecycle
 [[ $(k get runtimeclass permabox -o json | jq -r '.scheduling.nodeSelector["permabox.io.node-restriction.kubernetes.io/pinned"]') == true ]]
 

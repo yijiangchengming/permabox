@@ -79,4 +79,5 @@ workload_socket: /opt/permabox/workload.sock
 EOF
 node_exec /usr/local/bin/permabox validate-config
 check_containerd_mounts=true
+check_exclusions=true
 smoke_lifecycle

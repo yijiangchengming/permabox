@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"syscall"
@@ -32,7 +33,7 @@ func TestSweepWorkloadProtectsReusedAndUntrackedSlots(t *testing.T) {
 	prepareReleasedSlot(t, legacy, time.Now())
 	roots := []string{store}
 	candidates, err := m.DiscoverReleased(roots, "", 0, time.Now())
-	if err != nil || len(candidates) != 1 || candidates[0].Owner() != owner {
+	if err != nil || len(candidates) != 1 || !reflect.DeepEqual(candidates[0].Owner(), owner) {
 		t.Fatalf("discover = %+v, %v", candidates, err)
 	}
 	// Recreate and release the same slot while the policy is being evaluated.
@@ -52,7 +53,7 @@ func TestSweepWorkloadProtectsReusedAndUntrackedSlots(t *testing.T) {
 		t.Fatal(err)
 	}
 	candidates, err = m.DiscoverReleased(roots, "", 0, time.Now())
-	if err != nil || len(candidates) != 1 || candidates[0].Owner() != owner {
+	if err != nil || len(candidates) != 1 || !reflect.DeepEqual(candidates[0].Owner(), owner) {
 		t.Fatalf("rediscover = %+v, %v", candidates, err)
 	}
 	if err := m.RetireReleased(roots, "", time.Now(), candidates); err != nil {

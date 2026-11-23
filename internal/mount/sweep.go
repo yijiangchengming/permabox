@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -24,6 +25,11 @@ const (
 	scaleDownMarker = ".permabox-scale-down.json"
 	scaleDownGrace  = time.Minute
 )
+
+func sameOwner(a, b ownership.Owner) bool {
+	return a.Namespace == b.Namespace && a.Kind == b.Kind && a.Name == b.Name && a.UID == b.UID &&
+		a.Overrides == b.Overrides && slices.Equal(a.Excludes, b.Excludes)
+}
 
 type ReclaimReason uint8
 
@@ -99,7 +105,7 @@ func (m Manager) retireApproved(roots []string, target string, now time.Time, ap
 	var stageErr error
 	err := m.sweep(roots, target, 0, now, deadline, func(s ReleasedSlot) bool {
 		a, ok := byPath[s.path]
-		if !ok || s.identity != a.identity || s.owner != a.owner || !s.at.Equal(a.at) || !os.SameFile(s.file, a.file) {
+		if !ok || s.identity != a.identity || !sameOwner(s.owner, a.owner) || !s.at.Equal(a.at) || !os.SameFile(s.file, a.file) {
 			return false
 		}
 		if generation == 0 {
