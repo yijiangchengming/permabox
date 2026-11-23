@@ -129,7 +129,8 @@ func (m Manager) prepare(id, root, bundle, configRoot, slot, container string, o
 	if !info.IsDir() || !filepath.IsAbs(root) || !filepath.IsAbs(slot) || overlap(root, slot) || overlap(root, m.Dir) || overlap(slot, m.Dir) {
 		return false, errors.New("rootfs, storage slot and state directory must be separate absolute directories")
 	}
-	exclusions, err := resolveExclusionDirectories(root, owner.Excludes)
+	requested := owner.Excludes
+	exclusions, err := resolveExclusionDirectories(root, requested)
 	if err != nil {
 		return false, err
 	}
@@ -329,7 +330,7 @@ func (m Manager) prepare(id, root, bundle, configRoot, slot, container string, o
 	if err := writeRecord(lock.journal(id), want); err != nil {
 		return false, err
 	}
-	err = lock.install(id, &want)
+	err = lock.install(id, &want, requested)
 	if err == nil && bundle != "" {
 		err = lock.publishBundleRoot(id, &want)
 	}
@@ -399,7 +400,7 @@ func (m lockedManager) commitSlotOwnership(id string, state record, slot string)
 	return writeRecord(m.journal(id), state)
 }
 
-func (m lockedManager) install(id string, state *record) error {
+func (m lockedManager) install(id string, state *record, requested []string) error {
 	imageDirectories := make([]os.FileInfo, len(state.ExclusionMounts))
 	for i, exclusion := range state.ExclusionMounts {
 		info, err := os.Stat(filepath.Join(state.lowerSource(), exclusion.Path))
@@ -465,7 +466,7 @@ func (m lockedManager) install(id string, state *record) error {
 	}
 	if state.PendingOwner != nil {
 		for i := range state.ExclusionMounts {
-			if err := m.installExclusion(id, state, alias, i, imageDirectories[i]); err != nil {
+			if err := m.installExclusion(id, state, alias, requested[i], i, imageDirectories[i]); err != nil {
 				return err
 			}
 		}
@@ -485,11 +486,18 @@ func sameExclusionPaths(mounts []exclusionMount, paths []string) bool {
 	return true
 }
 
-func (m lockedManager) installExclusion(id string, state *record, alias string, index int, imageDirectory os.FileInfo) error {
+func (m lockedManager) installExclusion(id string, state *record, alias, requested string, index int, imageDirectory os.FileInfo) error {
 	item := state.ExclusionMounts[index]
 	path := item.Path
 	if strings.ContainsAny(item.Scratch+filepath.Join(state.Root, path)+filepath.Join(alias, path), ",:\\\n\r\t\x00") {
 		return errors.New("exclusion paths contain characters unsupported by OverlayFS mount options")
+	}
+	resolved, _, err := resolveRootfsPath(state.Root, requested)
+	if err != nil {
+		return fmt.Errorf("resolve exclusion %s in the writable rootfs: %w", requested, err)
+	}
+	if resolved != path {
+		return fmt.Errorf("exclusion %s resolves to a different directory in the writable rootfs", requested)
 	}
 	target := filepath.Join(state.Root, path)
 	if err := realDir(target); err != nil {
@@ -529,6 +537,9 @@ func findExclusionOverlay(mounts []entry, state record, alias string, item exclu
 	found := 0
 	for _, mount := range mounts {
 		if mount.Target != target {
+			if item.MountID != 0 && mount.ID == item.MountID {
+				return 0, fmt.Errorf("exclusion overlay mount %d moved from %s", item.MountID, target)
+			}
 			continue
 		}
 		if mount.Kind != "overlay" || !hasLayers(mount.Options, expected) {

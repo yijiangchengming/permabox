@@ -216,3 +216,13 @@ func hasMountTarget(mounts []entry, target string, id int) bool {
 	}
 	return false
 }
+
+func TestFindExclusionOverlayRejectsMovedMount(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join(dir, "rootfs")
+	item := exclusionMount{Path: "cache", Scratch: filepath.Join(dir, "scratch"), MountID: 43}
+	table := []entry{{ID: item.MountID, Target: filepath.Join(root, "other"), Kind: "overlay"}}
+	if _, err := findExclusionOverlay(table, record{Root: root}, filepath.Join(dir, "lower"), item); err == nil {
+		t.Fatal("accepted moved exclusion mount")
+	}
+}
