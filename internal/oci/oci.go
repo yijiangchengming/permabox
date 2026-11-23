@@ -152,6 +152,7 @@ type BundleOptions struct {
 	Persistence                *Bundle
 	StorageAlias, RuntimeAlias string
 	Namespace                  string
+	RedirectRoot               bool
 }
 
 type invalidPersistence struct{ error }
@@ -162,6 +163,11 @@ func IsInvalidPersistence(err error) bool {
 }
 
 func InspectBundle(bundle, annotation string) (BundleOptions, error) {
+	return InspectBundleWithRoot(bundle, annotation, "", "")
+}
+
+// InspectBundleWithRoot recognizes a root already redirected by a trusted journal.
+func InspectBundleWithRoot(bundle, annotation, target, source string) (BundleOptions, error) {
 	var options BundleOptions
 	data, err := readBundleConfig(bundle)
 	if err != nil {
@@ -199,8 +205,12 @@ func InspectBundle(bundle, annotation string) (BundleOptions, error) {
 		if name == "" {
 			return options, invalidPersistence{errors.New("CRI-O persistence requires the Kubernetes container name label")}
 		}
-		if !isCRIOVFSRoot(spec.Root.Path) {
-			return options, invalidPersistence{errors.New("CRI-O persistence requires a containers/storage VFS rootfs")}
+		if target != "" && spec.Root.Path == target {
+			spec.Root.Path = source
+		}
+		options.RedirectRoot = isCRIOOverlayRoot(spec.Root.Path)
+		if !options.RedirectRoot && !isCRIOVFSRoot(spec.Root.Path) {
+			return options, invalidPersistence{errors.New("CRI-O persistence requires a containers/storage overlay or VFS rootfs")}
 		}
 	}
 	if !podPattern.MatchString(ns) || !podPattern.MatchString(pod) {
@@ -225,6 +235,16 @@ func InspectBundle(bundle, annotation string) (BundleOptions, error) {
 const MaxBundleConfigSize = 4 << 20
 
 func readBundleConfig(bundle string) ([]byte, error) {
+	dir, err := openBundle(bundle)
+	if err != nil {
+		return nil, err
+	}
+	defer dir.Close()
+	data, _, err := readConfig(dir)
+	return data, err
+}
+
+func openBundle(bundle string) (*os.File, error) {
 	if filepath.Clean(bundle) != bundle {
 		return nil, errors.New("OCI bundle path must be clean")
 	}
@@ -236,36 +256,47 @@ func readBundleConfig(bundle string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer dir.Close()
 	dirInfo, err := dir.Stat()
 	if err != nil {
+		dir.Close()
 		return nil, err
 	}
 	if dirInfo.Mode().Perm()&0022 != 0 {
+		dir.Close()
 		return nil, errors.New("OCI bundle directory must be writable only by its trusted owner")
 	}
+	return dir, nil
+}
+
+func readConfig(dir *os.File) ([]byte, os.FileInfo, error) {
 	fd, err := syscall.Openat(int(dir.Fd()), "config.json", syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
 	if err != nil {
-		return nil, fmt.Errorf("open OCI config: %w", err)
+		return nil, nil, fmt.Errorf("open OCI config: %w", err)
 	}
 	file := os.NewFile(uintptr(fd), "config.json")
 	defer file.Close()
 	info, err := file.Stat()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	uid := int(info.Sys().(*syscall.Stat_t).Uid)
 	if !info.Mode().IsRegular() || info.Mode().Perm()&0022 != 0 || (uid != 0 && uid != os.Geteuid()) {
-		return nil, errors.New("OCI config must be a regular file writable only by its trusted owner")
+		return nil, nil, errors.New("OCI config must be a regular file writable only by its trusted owner")
 	}
 	data, err := io.ReadAll(io.LimitReader(file, MaxBundleConfigSize+1))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if len(data) > MaxBundleConfigSize {
-		return nil, errors.New("OCI config exceeds 4 MiB")
+		return nil, nil, errors.New("OCI config exceeds 4 MiB")
 	}
-	return data, nil
+	return data, info, nil
+}
+
+func isCRIOOverlayRoot(root string) bool {
+	layer := filepath.Dir(root)
+	return filepath.IsAbs(root) && filepath.Clean(root) == root && filepath.Base(root) == "merged" &&
+		crioVFSLayer.MatchString(filepath.Base(layer)) && filepath.Base(filepath.Dir(layer)) == "overlay"
 }
 
 func isCRIOVFSRoot(root string) bool {

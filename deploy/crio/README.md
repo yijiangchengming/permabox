@@ -2,26 +2,26 @@
 
 [简体中文](README-cn.md)
 
-The [CRI-O compatibility workflow](../../.github/workflows/compat-crio.yml) runs upstream Kubernetes on Ubuntu 24.04 (amd64) with VFS and the conmon and runc binaries bundled by CRI-O:
+The compatibility workflow pairs upstream Kubernetes and CRI-O on Ubuntu 24.04 (amd64) with the conmon and runc binaries bundled by CRI-O. [CI workflow](../../.github/workflows/compat-crio.yml)
 
-| Kubernetes | CRI-O | Storage driver | OCI runtime |
-| --- | --- | --- | --- |
-| 1.34.0 | 1.34.0 | VFS | runc |
-| 1.35.8 | 1.35.8 | VFS | runc |
-| 1.36.4 | 1.36.4 | VFS | runc |
-| 1.37.0 | 1.37.0 | VFS | runc |
+| Kubernetes | CRI-O | OCI runtime | VFS | Native overlay |
+| --- | --- | --- | --- | --- |
+| 1.34.0 | 1.34.0 | runc | Existing CI coverage | Added CI job, end-to-end verification pending |
+| 1.35.8 | 1.35.8 | runc | Existing CI coverage | Added CI job, end-to-end verification pending |
+| 1.36.4 | 1.36.4 | runc | Existing CI coverage | Added CI job, end-to-end verification pending |
+| 1.37.0 | 1.37.0 | runc | Existing CI coverage | Added CI job, end-to-end verification pending |
 
-Each entry checks file creation, modification and deletion across Pod replacement, per-replica isolation, partial scale-down, scale-to-zero reclamation, StatefulSet deletion and annotation overrides. The table lists exact CI pairs; other patches and mixed Kubernetes/CRI-O versions are not covered. Checkpoint/restore, alternate OCI runtimes, user namespaces, enforcing SELinux and OpenShift are outside this test coverage.
+Both jobs exercise rootfs persistence, replica isolation, reclamation, and a writable node `hostPath` mounted directly and through a directory `subPath`. They check both volume paths after Pod replacement and verify that node files survive PermaBox rootfs reclamation. The overlay job also runs CRI `StopContainer` and `RemoveContainer` separately and checks which mounts survive each call. PVC and CSI backends, read-only mounts, mount propagation, `subPathExpr`, checkpoint and restore, alternate OCI runtimes, user namespaces, enforcing SELinux, and OpenShift are outside this matrix. [Smoke test](smoke_test.sh)
 
-Use a dedicated Linux node or disposable CRI-O instance. VFS is a CRI-O-wide setting, needs a separate graph and run root, and uses more disk space because it copies layers. Do not switch an existing production node to VFS in place.
+With CRI-O's native `overlay` driver, PermaBox mounts the container rootfs at `<state_dir>/<container-id>.rootfs` and updates `root.path` in the runtime bundle. CRI-O can unmount and replace its own `merged` directory during `StopContainer`. PermaBox keeps the lower bind and the separate rootfs until OCI `delete`. The persistent write layer uses `<storage_root>/<namespace>/<pod-name>/upper`. The VFS path uses its existing mount layout.
 
-CRI-O's default `overlay` driver is unsupported. `StopContainer` asks `containers/storage` to unmount the rootfs before CRI-O invokes OCI `delete`. The overlay driver's lazy unmount detaches PermaBox's top mount and leaves CRI-O's original mount in place, so replacing the mountpoint fails with `EBUSY`. VFS returns a directory and its stop-time `Put` is a no-op. OCI `delete` can therefore clean up PermaBox's overlay before storage removes that directory. PermaBox rejects selected CRI-O workloads whose OCI rootfs does not use the VFS layout.
+After an interrupted create, let CRI-O retry OCI deletion in the original mount namespace. GC retains the journal when the recorded configuration or surviving mounts prevent it from confirming safe cleanup. Use the runtime and bundle paths recorded for that container to investigate. [Recovery instructions](../README.md)
 
 ## Install on the target node
 
 1. Install the built binary at `/usr/local/bin/permabox` and install [the PermaBox config](../config.yaml) at `/etc/permabox/config.yaml`, owned by root. Ensure `underlying_runtime` points to the node's actual `runc` binary. Keep `storage_root` on compatible local storage, outside CRI-O's graph and run roots. Leave GC disabled for the first test. See the [shared deployment guide](../README.md) for storage and security requirements.
-2. Install [99-permabox-vfs.conf](99-permabox-vfs.conf) under `/etc/crio/crio.conf.d/`. Check for CLI flags or later drop-ins overriding the VFS settings, and remove any inherited overlay-specific `storage_option` settings from this dedicated instance. Point `monitor_path` at conmon if it is not on the service's `PATH`. Leave the default runtime and cgroup manager appropriate for the node. Run `sudo crio config` to inspect the merged configuration, restart CRI-O, then run `sudo crictl --runtime-endpoint unix:///run/crio/crio.sock info` (adjust for the socket kubelet actually uses).
-3. Label exactly one eligible node and apply [runtimeclass.yaml](runtimeclass.yaml). CRI-O workloads select `runtimeClassName: permabox-crio`. The OCI handler remains `permabox`; the distinct RuntimeClass name lets CRI-O and containerd use different node selectors in the same cluster.
+2. On a node using the native overlay driver, install the [overlay runtime drop-in](99-permabox-overlay.conf) under `/etc/crio/crio.conf.d/`. It only registers the OCI handler. Use the [VFS drop-in](99-permabox-vfs.conf) on a dedicated VFS instance with its own graph and run roots. Keep the existing driver on a production store. Point `monitor_path` at conmon if needed. In a maintenance window, check the merged CRI-O config, restart CRI-O, and verify the CRI endpoint used by kubelet with `crictl info`.
+3. Label exactly one eligible node and apply [runtimeclass.yaml](runtimeclass.yaml). CRI-O workloads select `runtimeClassName: permabox-crio`. The OCI handler remains `permabox`; the distinct RuntimeClass name lets CRI-O and containerd use different node selectors in the same cluster. The existing `crio-vfs` node label also selects overlay nodes.
 
 Before deploying a persistent workload, create `/opt/permabox` with owner `root` and mode `0700` on the node. Label it `permabox.io.node-restriction.kubernetes.io/crio-gc=true`, apply [the metadata bridge](../kubernetes/workload-bridge.yaml), and wait for its DaemonSet to be ready. The socket path in the example config is `/opt/permabox/workload.sock`. This bridge is required even with GC disabled.
 
@@ -55,4 +55,4 @@ Each StatefulSet ordinal has an independent write layer. Scaling from two replic
 
 - [CRI-O sandbox annotations](https://github.com/cri-o/cri-o/blob/v1.34.0/server/sandbox_run_linux.go) and [workload annotation generation](https://github.com/cri-o/cri-o/blob/v1.34.0/internal/factory/container/container.go): CRI-O marks sandbox and workload containers using `io.kubernetes.cri-o.ContainerType`, and copies sandbox annotations and the [kubelet's workload labels](https://github.com/kubernetes/kubernetes/blob/v1.34.0/pkg/kubelet/kuberuntime/labels.go) into the workload OCI spec. `permabox.io/*` is outside CRI-O's recognized experimental annotation set; adding those keys to `allowed_annotations` is [rejected](https://github.com/cri-o/cri-o/blob/v1.34.0/pkg/config/config.go).
 - [CRI-O OCI runtime](https://github.com/cri-o/cri-o/blob/v1.34.0/internal/oci/runtime_oci.go) and [conmon argv assembly](https://github.com/containers/conmon/blob/v2.1.13/src/runtime_args.c): conmon invokes `create` with `--bundle` and `--pid-file`; CRI-O invokes `start` and `delete --force` directly with the runtime root. PermaBox's existing runc CLI parser already handles those forms.
-- [Stop order](https://github.com/cri-o/cri-o/blob/v1.34.0/server/container_stop.go), [remove order](https://github.com/cri-o/cri-o/blob/v1.34.0/server/container_remove.go), and the [overlay](https://github.com/containers/storage/blob/v1.58.0/drivers/overlay/overlay.go) and [VFS](https://github.com/containers/storage/blob/v1.58.0/drivers/vfs/driver.go) drivers explain why this slice requires VFS.
+- [Stop order](https://github.com/cri-o/cri-o/blob/v1.34.0/server/container_stop.go), [remove order](https://github.com/cri-o/cri-o/blob/v1.34.0/server/container_remove.go), and the [overlay](https://github.com/containers/storage/blob/v1.58.0/drivers/overlay/overlay.go) and [VFS](https://github.com/containers/storage/blob/v1.58.0/drivers/vfs/driver.go) drivers define the two cleanup sequences.

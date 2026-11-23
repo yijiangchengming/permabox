@@ -180,7 +180,7 @@ func (m lockedManager) sweepLocked(roots []string, target string, ttl time.Durat
 		}
 		terminal := !state.ReleasedAt.IsZero()
 		if target == "" && state.Namespace == ns && (terminal ||
-			(now.Sub(info.ModTime()) >= staleAge && staleRoot(state.Root, mounts))) {
+			(now.Sub(info.ModTime()) >= staleAge && staleRoot(state, m.alias(id), mounts))) {
 			var err error
 			if terminal {
 				err = m.releaseLocked(id, state, now)
@@ -235,14 +235,16 @@ func (m lockedManager) sweepLocked(roots []string, target string, ttl time.Durat
 	return retired, result
 }
 
-func staleRoot(root string, mounts []entry) bool {
-	// The journal only records rootfs. Require its containing directory to
-	// be gone as well, so an existing bundle with a missing rootfs is kept.
-	if !errors.Is(realDir(filepath.Dir(root)), os.ErrNotExist) {
+func staleRoot(state record, alias string, mounts []entry) bool {
+	bundle := state.Bundle
+	if bundle == "" {
+		bundle = filepath.Dir(state.Root)
+	}
+	if !errors.Is(realDir(bundle), os.ErrNotExist) {
 		return false
 	}
 	for _, mount := range mounts {
-		if within(root, mount.Target) {
+		if within(state.Root, mount.Target) || (state.Source != "" && within(alias, mount.Target)) {
 			return false
 		}
 	}

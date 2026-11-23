@@ -4,7 +4,9 @@ set -Eeuo pipefail
 
 assets=$(realpath "${1:?pass the directory containing the verified release assets}")
 version=${2:?pass the Kubernetes and CRI-O release version (vX.Y.Z)}
+driver=${3:-vfs}
 [[ $version =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { printf 'Invalid release version: %s\n' "$version" >&2; exit 1; }
+[[ $driver == vfs || $driver == overlay ]] || { printf 'Invalid storage driver: %s\n' "$driver" >&2; exit 1; }
 bundle=$assets/cri-o
 socket=unix:///run/crio/crio.sock
 ns=permabox-demo
@@ -21,7 +23,7 @@ app() { k -n "$ns" "$@"; }
 source deploy/kubernetes/smoke_lifecycle.sh
 
 [[ $(ps -p 1 -o comm=) == systemd ]] || { printf 'Requires a disposable systemd VM\n' >&2; exit 1; }
-for path in /etc/kubernetes /etc/crio /etc/permabox /opt/permabox /run/permabox /var/lib/permabox /var/lib/kubelet /var/lib/etcd /var/lib/containers/permabox-crio-vfs /usr/local/bin/{permabox,crio,pinns,kubelet} /etc/cni/net.d/10-permabox.conflist; do
+for path in /etc/kubernetes /etc/crio /etc/permabox /opt/permabox /run/permabox /var/lib/permabox /var/lib/kubelet /var/lib/etcd /var/lib/containers/permabox-crio-{vfs,overlay} /usr/local/bin/{permabox,crio,pinns,kubelet} /etc/cni/net.d/10-permabox.conflist; do
   if node_exec test -e "$path" || node_exec test -L "$path"; then
     printf 'Refusing to modify a VM with existing path %s\n' "$path" >&2
     exit 1
@@ -63,7 +65,14 @@ node_exec install -Dm0755 -t /usr/libexec/crio "$bundle/bin/"{conmon,runc}
 node_exec install -Dm0755 -t /opt/cni/bin "$bundle/cni-plugins/"{bridge,host-local,loopback,portmap}
 node_exec install -Dm0644 "$bundle/contrib/policy.json" /etc/crio/policy.json
 node_exec install -Dm0644 "$bundle/contrib/crio.service" /etc/systemd/system/crio.service
-node_exec install -Dm0644 deploy/crio/99-permabox-vfs.conf /etc/crio/crio.conf.d/99-permabox-vfs.conf
+node_exec install -Dm0644 "deploy/crio/99-permabox-$driver.conf" /etc/crio/crio.conf.d/99-permabox.conf
+if [[ $driver == overlay ]]; then
+  node_exec tee /etc/crio/crio.conf.d/90-ci-storage.conf >/dev/null <<'EOF'
+[crio]
+root = "/var/lib/containers/permabox-crio-overlay"
+runroot = "/run/containers/permabox-crio-overlay"
+EOF
+fi
 
 node_exec tee /etc/crio/crio.conf.d/10-ci.conf >/dev/null <<'EOF'
 [crio.image]
@@ -121,7 +130,7 @@ node_exec systemctl enable kubelet
 
 cri() { node_exec "$bundle/bin/crictl" --runtime-endpoint "$socket" --image-endpoint "$socket" "$@"; }
 cri version
-node_exec /usr/local/bin/crio status info | grep -Fx 'storage driver: vfs'
+node_exec /usr/local/bin/crio status info | grep -Fx "storage driver: $driver"
 node_exec /usr/libexec/crio/conmon --version
 node_exec /usr/libexec/crio/runc --version
 node_exec "$assets/kubeadm" init --kubernetes-version="$version" --cri-socket="$socket" \
@@ -144,14 +153,37 @@ expect_marker() {
   app exec "permabox-demo-$1" -c demo -- grep -Fx "replica-$1" /etc/permabox-marker
 }
 app apply -k "$example_overlay"
-app patch statefulset permabox-demo --type=merge -p '{"spec":{"replicas":2,"template":{"spec":{"terminationGracePeriodSeconds":1}}}}'
+node_exec mkdir -m 0755 /var/lib/permabox-ci-volumes
+node_exec install -d -o root -g root -m 0755 /var/lib/permabox-ci-volumes/nested
+app patch statefulset permabox-demo --type=strategic --patch-file /dev/stdin <<'EOF'
+spec:
+  replicas: 2
+  template:
+    spec:
+      terminationGracePeriodSeconds: 1
+      volumes:
+        - name: host-data
+          hostPath:
+            path: /var/lib/permabox-ci-volumes
+            type: Directory
+      containers:
+        - name: demo
+          volumeMounts:
+            - name: host-data
+              mountPath: /host-data
+            - name: host-data
+              mountPath: /subpath-data
+              subPath: nested
+EOF
 app rollout status statefulset/permabox-demo --timeout=180s
 for ordinal in 0 1; do
   # shellcheck disable=SC2016
   app exec "permabox-demo-$ordinal" -c demo -- sh -ec '
     test ! -e /etc/permabox-marker
     printf "%s\n" "$1" >/etc/permabox-marker
-  ' sh "replica-$ordinal"
+    printf "%s\n" "$1" >/host-data/hostpath-$2
+    printf "%s\n" "$1" >/subpath-data/subpath-$2
+  ' sh "replica-$ordinal" "$ordinal"
   expect_marker "$ordinal"
 done
 
@@ -169,6 +201,46 @@ wait_for new_pod ''
 ready
 expect_marker 1
 expect_marker 0
+pod=permabox-demo-0
+original=$(uid)
+if [[ $driver == overlay ]]; then
+  id=$(app get pod "$pod" -o jsonpath='{.status.containerStatuses[?(@.name=="demo")].containerID}')
+  [[ $id =~ ^cri-o://[a-f0-9]{64}$ ]]
+  id=${id#cri-o://}
+  journal=/run/permabox/$id.json
+  source_root=$(node_exec cat "$journal" | jq -er '.source')
+  runtime_root=$(node_exec cat "$journal" | jq -er '.root')
+  [[ $source_root == /var/lib/containers/permabox-crio-overlay/overlay/*/merged ]]
+  [[ $runtime_root == "/run/permabox/$id.rootfs" ]]
+  node_exec findmnt --mountpoint "$source_root" --types overlay
+  node_exec findmnt --mountpoint "$runtime_root" --types overlay
+
+  # Pause kubelet reconciliation so StopContainer and RemoveContainer can
+  # be exercised separately on the same container.
+  node_exec systemctl stop kubelet
+  cri stop --timeout 10 "$id"
+  if node_exec findmnt --mountpoint "$source_root"; then
+    exit 1
+  fi
+  node_exec test -d "$source_root"
+  node_exec grep -Fx replica-0 "$runtime_root/etc/permabox-marker"
+  cri rm "$id"
+  node_exec test ! -e "$journal"
+  node_exec test ! -e "$runtime_root"
+  node_exec test ! -e "/run/permabox/$id.lower"
+  node_exec systemctl start kubelet
+fi
+app delete pod "$pod" --wait=false
+wait_for new_pod "$original"
+ready
+expect_marker 0
+# shellcheck disable=SC2016
+app exec "$pod" -c demo -- sh -ec '
+  test "$(cat /host-data/hostpath-0)" = replica-0
+  test "$(cat /subpath-data/subpath-0)" = replica-0
+'
+node_exec grep -Fx replica-0 /var/lib/permabox-ci-volumes/hostpath-0
+node_exec grep -Fx replica-0 /var/lib/permabox-ci-volumes/nested/subpath-0
 
 app scale statefulset permabox-demo --replicas=0
 for ordinal in 1 0; do
@@ -177,3 +249,5 @@ for ordinal in 1 0; do
   wait_for stopped
   wait_for gc_removed
 done
+node_exec grep -Fx replica-0 /var/lib/permabox-ci-volumes/hostpath-0
+node_exec grep -Fx replica-0 /var/lib/permabox-ci-volumes/nested/subpath-0
