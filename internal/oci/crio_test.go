@@ -32,7 +32,7 @@ func TestCRIOBundle(t *testing.T) {
 		name, kind, container, root string
 		persist, invalid, redirect  bool
 	}{
-		{"selected", "container", "app", "/storage/vfs/dir/" + layer, true, false, false},
+		{"VFS rejected", "container", "app", "/storage/vfs/dir/" + layer, false, true, false},
 		{"sandbox", "sandbox", "POD", "/storage/overlay/" + layer + "/merged", false, false, false},
 		{"sidecar", "container", "sidecar", "/storage/overlay/" + layer + "/merged", false, false, false},
 		{"overlay redirected", "container", "app", "/storage/overlay/" + layer + "/merged", true, false, true},

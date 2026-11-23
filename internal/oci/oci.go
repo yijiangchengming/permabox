@@ -41,7 +41,7 @@ func set(values ...string) map[string]bool {
 
 var idPattern = regexp.MustCompile(`^[A-Za-z0-9_+.-]{1,240}$`)
 var podPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$`)
-var crioVFSLayer = regexp.MustCompile(`^[a-f0-9]{64}$`)
+var crioOverlayLayer = regexp.MustCompile(`^[a-f0-9]{64}$`)
 
 func ValidID(id string) bool {
 	return idPattern.MatchString(id) && id != "." && id != ".."
@@ -209,8 +209,8 @@ func InspectBundleWithRoot(bundle, annotation, target, source string) (BundleOpt
 			spec.Root.Path = source
 		}
 		options.RedirectRoot = isCRIOOverlayRoot(spec.Root.Path)
-		if !options.RedirectRoot && !isCRIOVFSRoot(spec.Root.Path) {
-			return options, invalidPersistence{errors.New("CRI-O persistence requires a containers/storage overlay or VFS rootfs")}
+		if !options.RedirectRoot {
+			return options, invalidPersistence{errors.New("CRI-O persistence requires a containers/storage native overlay rootfs")}
 		}
 	}
 	if !podPattern.MatchString(ns) || !podPattern.MatchString(pod) {
@@ -296,13 +296,5 @@ func readConfig(dir *os.File) ([]byte, os.FileInfo, error) {
 func isCRIOOverlayRoot(root string) bool {
 	layer := filepath.Dir(root)
 	return filepath.IsAbs(root) && filepath.Clean(root) == root && filepath.Base(root) == "merged" &&
-		crioVFSLayer.MatchString(filepath.Base(layer)) && filepath.Base(filepath.Dir(layer)) == "overlay"
-}
-
-func isCRIOVFSRoot(root string) bool {
-	parent := filepath.Dir(root)
-	// Only VFS leaves the graph driver's rootfs alone during CRI StopContainer.
-	return filepath.IsAbs(root) && filepath.Clean(root) == root &&
-		filepath.Base(parent) == "dir" && filepath.Base(filepath.Dir(parent)) == "vfs" &&
-		crioVFSLayer.MatchString(filepath.Base(root))
+		crioOverlayLayer.MatchString(filepath.Base(layer)) && filepath.Base(filepath.Dir(layer)) == "overlay"
 }
