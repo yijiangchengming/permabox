@@ -30,15 +30,19 @@ type lockedManager struct {
 func New(dir string) Manager { return Manager{Dir: dir, sys: linux{}} }
 
 type record struct {
-	Namespace    string           `json:"mount_namespace"`
-	Root         string           `json:"root"`
-	Slot         string           `json:"slot"`
-	SlotIdentity *slotIdentity    `json:"slot_identity,omitempty"`
-	LowerID      int              `json:"lower_mount_id,omitempty"`
-	OverlayID    int              `json:"overlay_mount_id,omitempty"`
-	ReleasedAt   time.Time        `json:"released_at,omitempty"`
-	PendingOwner *ownership.Owner `json:"pending_workload_owner,omitempty"`
-	Started      bool             `json:"ownership_commit_pending,omitempty"`
+	Namespace     string           `json:"mount_namespace"`
+	Root          string           `json:"root"`
+	Source        string           `json:"source,omitempty"`
+	Bundle        string           `json:"bundle,omitempty"`
+	SourceID      int              `json:"source_mount_id,omitempty"`
+	ConfigPending bool             `json:"config_redirect_pending,omitempty"`
+	Slot          string           `json:"slot"`
+	SlotIdentity  *slotIdentity    `json:"slot_identity,omitempty"`
+	LowerID       int              `json:"lower_mount_id,omitempty"`
+	OverlayID     int              `json:"overlay_mount_id,omitempty"`
+	ReleasedAt    time.Time        `json:"released_at,omitempty"`
+	PendingOwner  *ownership.Owner `json:"pending_workload_owner,omitempty"`
+	Started       bool             `json:"ownership_commit_pending,omitempty"`
 }
 
 type slotIdentity struct {
@@ -59,6 +63,7 @@ func (r record) MarshalJSON() ([]byte, error) {
 }
 
 const releasedMarker = ".permabox-released.json"
+const maxMountRecordSize = 64 << 10
 
 func (m lockedManager) journal(id string) string {
 	return filepath.Join(trustedpath.FDPath(m.File), id+".json")
@@ -72,6 +77,18 @@ func (m Manager) Prepare(id, root, slot, container string) (bool, error) {
 }
 
 func (m Manager) PrepareOwned(id, root, slot, container string, owner ownership.Owner) (bool, error) {
+	return m.prepare(id, root, "", slot, container, owner)
+}
+
+func (m Manager) PrepareRedirected(id, source, bundle, slot, container string, owner ownership.Owner) (bool, error) {
+	bundle, err := filepath.Abs(bundle)
+	if err != nil {
+		return false, err
+	}
+	return m.prepare(id, source, bundle, slot, container, owner)
+}
+
+func (m Manager) prepare(id, root, bundle, slot, container string, owner ownership.Owner) (bool, error) {
 	if !oci.ValidID(id) {
 		return false, errors.New("invalid container ID")
 	}
@@ -85,6 +102,7 @@ func (m Manager) PrepareOwned(id, root, slot, container string, owner ownership.
 	if len(containerRecord) > maxContainerRecordSize {
 		return false, errors.New("encoded container name exceeds the storage marker limit")
 	}
+	inputRoot := root
 	root, err = filepath.EvalSymlinks(root)
 	if err != nil {
 		return false, err
@@ -101,6 +119,18 @@ func (m Manager) PrepareOwned(id, root, slot, container string, owner ownership.
 		return false, err
 	}
 	defer lock.Close()
+	var source string
+	var sourceID int
+	if bundle != "" {
+		if root != inputRoot || overlap(bundle, m.Dir) || overlap(bundle, slot) || overlap(bundle, root) {
+			return false, errors.New("CRI-O source, bundle, storage slot and state directory must be separate")
+		}
+		sourceID, err = m.overlaySourceID(root)
+		if err != nil {
+			return false, err
+		}
+		source, root = root, m.redirectTarget(id)
+	}
 	if isRetiredPath(slot) {
 		return false, errors.New("reserved storage slot path")
 	}
@@ -122,14 +152,21 @@ func (m Manager) PrepareOwned(id, root, slot, container string, owner ownership.
 		return false, err
 	}
 	identity := storageIdentity(slotInfo)
-	want := record{Namespace: ns, Root: root, Slot: slot, SlotIdentity: &identity, PendingOwner: &owner}
+	want := record{Namespace: ns, Root: root, Source: source, Bundle: bundle, SourceID: sourceID, Slot: slot, SlotIdentity: &identity, PendingOwner: &owner}
+	encodedWant, err := json.Marshal(want)
+	if err != nil {
+		return false, err
+	}
+	if len(encodedWant) > maxMountRecordSize {
+		return false, errors.New("persistence metadata exceeds the mount record limit")
+	}
 	prev, err := readRecord(lock.journal(id))
 	retry := err == nil
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return false, err
 	}
 	if retry {
-		if prev.Namespace != ns || prev.Root != root || prev.Slot != slot {
+		if prev.Namespace != ns || prev.Root != root || prev.Source != source || prev.Bundle != bundle || prev.SourceID != sourceID || prev.Slot != slot {
 			return false, errors.New("container ID already has a different persistence record")
 		}
 		if prev.SlotIdentity != nil && *prev.SlotIdentity != identity {
@@ -151,7 +188,8 @@ func (m Manager) PrepareOwned(id, root, slot, container string, owner ownership.
 		if err != nil {
 			return false, err
 		}
-		if other.Slot == slot || (other.Namespace == ns && other.Root == root) {
+		if other.Slot == slot || (other.Namespace == ns && (other.Root == root ||
+			(source != "" && (other.Source == source || other.Root == source)) || other.Source == root)) {
 			return false, fmt.Errorf("rootfs or storage slot already in use by %s", file.Name())
 		}
 		if other.SlotIdentity != nil {
@@ -183,13 +221,32 @@ func (m Manager) PrepareOwned(id, root, slot, container string, owner ownership.
 		if own == 0 {
 			return false, errors.New("previous create was interrupted; delete the container before retrying")
 		}
+		if source != "" {
+			lower, err := lowerMountID(mounts, alias)
+			if err != nil {
+				return false, err
+			}
+			if lower == 0 || lower != prev.LowerID {
+				return false, errors.New("previous create is missing its original lower bind mount")
+			}
+		}
 		if err := bindSlotOwner(slot, owner); err != nil {
 			return false, err
+		}
+		if bundle != "" {
+			if err := lock.publishBundleRoot(id, &prev); err != nil {
+				return false, err
+			}
 		}
 		return false, removeDurable(filepath.Join(slot, releasedMarker))
 	}
 	if _, err := os.Lstat(alias); !errors.Is(err, os.ErrNotExist) {
 		return false, fmt.Errorf("lower mount path is not available: %s", alias)
+	}
+	if bundle != "" {
+		if _, err := os.Lstat(root); !errors.Is(err, os.ErrNotExist) {
+			return false, fmt.Errorf("redirected rootfs path is not available: %s", root)
+		}
 	}
 	fresh := false
 	if owner.Valid() {
@@ -224,7 +281,11 @@ func (m Manager) PrepareOwned(id, root, slot, container string, owner ownership.
 	if err := writeRecord(lock.journal(id), want); err != nil {
 		return false, err
 	}
-	if err := lock.install(id, &want); err != nil {
+	err = lock.install(id, &want)
+	if err == nil && bundle != "" {
+		err = lock.publishBundleRoot(id, &want)
+	}
+	if err != nil {
 		if fresh {
 			return false, errors.Join(err, lock.releaseLocked(id, want, time.Now().UTC()))
 		}
@@ -292,7 +353,12 @@ func (m lockedManager) install(id string, state *record) error {
 	if err := os.Mkdir(alias, 0700); err != nil {
 		return err
 	}
-	if err := m.sys.mount(state.Root, alias, "", syscall.MS_BIND, ""); err != nil {
+	if state.Source != "" {
+		if err := os.Mkdir(state.Root, 0700); err != nil {
+			return err
+		}
+	}
+	if err := m.sys.mount(state.lowerSource(), alias, "", syscall.MS_BIND, ""); err != nil {
 		return fmt.Errorf("bind original rootfs: %w", err)
 	}
 	mounts, err := m.sys.mounts()
@@ -318,6 +384,11 @@ func (m lockedManager) install(id string, state *record) error {
 	}
 	if err := m.sys.mount("overlay", state.Root, "overlay", 0, overlayOptions(*state, alias)+",index=off,metacopy=off"); err != nil {
 		return fmt.Errorf("mount writable overlay: %w", err)
+	}
+	if state.Source != "" {
+		if err := m.sys.mount("", state.Root, "", syscall.MS_PRIVATE, ""); err != nil {
+			return fmt.Errorf("make writable overlay private: %w", err)
+		}
 	}
 	mounts, err = m.sys.mounts()
 	if err != nil {
@@ -462,6 +533,9 @@ func (m lockedManager) cleanupLockedAt(id string, state record, now time.Time) e
 	if ns != state.Namespace {
 		return errors.New("mount namespace differs from create; persistence record retained")
 	}
+	if state.Source != "" && state.Root != m.redirectTarget(id) {
+		return errors.New("invalid redirected rootfs target in journal")
+	}
 	var slot *os.File
 	if !now.IsZero() {
 		slot, err = openRecordedSlot(state)
@@ -506,8 +580,20 @@ func (m lockedManager) cleanupLockedAt(id string, state record, now time.Time) e
 	if lower != 0 && lower != state.LowerID {
 		// A crash immediately after bind can leave a mount without a recorded ID.
 		// Before the overlay is installed, the two paths should name the same inode.
-		if state.LowerID != 0 || own != 0 || !sameFile(state.Root, alias) {
+		if state.LowerID != 0 || own != 0 || !sameFile(state.lowerSource(), alias) {
 			return errors.New("lower alias is covered by a mount not owned by PermaBox")
+		}
+	}
+	if state.Source != "" {
+		for _, e := range mounts {
+			if e.Target == state.Root && e.ID != own {
+				return errors.New("redirected rootfs target has a foreign mount")
+			}
+		}
+		if state.ConfigPending {
+			if _, err := oci.ReplaceBundleRoot(state.Bundle, state.Root, state.Source); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("restore CRI-O bundle root: %w", err)
+			}
 		}
 	}
 	if own != 0 {
@@ -522,6 +608,11 @@ func (m lockedManager) cleanupLockedAt(id string, state record, now time.Time) e
 	}
 	if err := remove(alias); err != nil {
 		return err
+	}
+	if state.Source != "" {
+		if err := remove(state.Root); err != nil {
+			return err
+		}
 	}
 	if slot != nil {
 		path := trustedpath.FDPath(slot)
@@ -630,12 +721,19 @@ func overlap(a, b string) bool {
 
 func readRecord(path string) (record, error) {
 	var out record
-	if err := readRecordFile(path, 64<<10, &out); err != nil {
+	if err := readRecordFile(path, maxMountRecordSize, &out); err != nil {
 		return out, err
 	}
 	if out.Namespace == "" || !filepath.IsAbs(out.Root) || !filepath.IsAbs(out.Slot) ||
 		filepath.Clean(out.Root) != out.Root || filepath.Clean(out.Slot) != out.Slot {
 		return out, fmt.Errorf("incomplete persistence record %s", path)
+	}
+	if out.Source != "" || out.Bundle != "" || out.SourceID != 0 || out.ConfigPending {
+		if !filepath.IsAbs(out.Source) || !filepath.IsAbs(out.Bundle) || out.SourceID <= 0 ||
+			filepath.Clean(out.Source) != out.Source || filepath.Clean(out.Bundle) != out.Bundle ||
+			overlap(out.Source, out.Root) || overlap(out.Bundle, out.Root) || overlap(out.Bundle, out.Source) {
+			return out, fmt.Errorf("invalid redirected rootfs record %s", path)
+		}
 	}
 	return out, nil
 }

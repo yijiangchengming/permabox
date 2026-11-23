@@ -108,6 +108,47 @@ func TestKernelPersistence(t *testing.T) {
 	if _, err := os.Stat(slot); !os.IsNotExist(err) {
 		t.Fatalf("released slot still exists after immediate reclaim: %v", err)
 	}
+	t.Run("CRI-O replaces merged before OCI delete", func(t *testing.T) {
+		const id = "crio"
+		bundle := filepath.Join(base, "crio-bundle")
+		driver := filepath.Join(base, "crio-storage")
+		source := filepath.Join(driver, "merged")
+		upper := filepath.Join(driver, "upper")
+		work := filepath.Join(driver, "work")
+		for _, dir := range []string{bundle, source, upper, work} {
+			mkdir(t, dir)
+		}
+		put(t, bundle, "config.json", `{"root":{"path":"`+source+`"},"mounts":[]}`)
+		opts := "lowerdir=" + image + ",upperdir=" + upper + ",workdir=" + work
+		if err := syscall.Mount("overlay", source, "overlay", 0, opts); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = syscall.Unmount(source, syscall.MNT_DETACH) })
+		target := filepath.Join(m.Dir, id+".rootfs")
+		t.Cleanup(func() { _ = syscall.Unmount(target, syscall.MNT_DETACH) })
+		t.Cleanup(func() { _ = syscall.Unmount(m.alias(id), syscall.MNT_DETACH) })
+		if _, err := m.PrepareRedirected(id, source, bundle, slot, "app", owner); err != nil {
+			t.Fatal(err)
+		}
+		put(t, target, "created", "retained write")
+		assertMissing(t, filepath.Join(source, "created"))
+		if err := syscall.Unmount(source, syscall.MNT_DETACH); err != nil {
+			t.Fatal(err)
+		}
+		replacement := filepath.Join(driver, "merged.1")
+		mkdir(t, replacement)
+		if err := syscall.Rename(replacement, source); err != nil {
+			t.Fatal(err)
+		}
+		check(t, target, "edited", "from image")
+		check(t, target, "created", "retained write")
+		if err := m.Cleanup(id); err != nil {
+			t.Fatal(err)
+		}
+		assertMissing(t, target)
+		assertMissing(t, m.alias(id))
+		check(t, filepath.Join(slot, "upper"), "created", "retained write")
+	})
 	t.Run("retirement does not cross bind mounts", func(t *testing.T) {
 		prepareReleasedSlot(t, slot, time.Now())
 		parked, err := retireSlot(slot, time.Time{})

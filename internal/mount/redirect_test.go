@@ -1,0 +1,49 @@
+//go:build linux
+
+package mount
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/yijiangchengming/permabox/internal/ownership"
+)
+
+func TestRedirectConfigFailureRollsBackMounts(t *testing.T) {
+	m, sys, source, slot := fixture(t)
+	bundle := filepath.Join(filepath.Dir(source), "bundle")
+	mkdir(t, bundle)
+	put(t, bundle, "config.json", `{"root":{"path":"/unexpected-root"}}`)
+	upstream := entry{ID: 99, Target: source, Kind: "overlay", FSRoot: "/"}
+	sys.table = []entry{upstream}
+
+	if _, err := m.PrepareRedirected("id", source, bundle, slot, "app", ownership.Owner{}); err == nil {
+		t.Fatal("replaced a bundle pointing to a different root")
+	}
+	if len(sys.table) != 1 || sys.table[0] != upstream {
+		t.Fatalf("rollback changed the upstream mount table: %+v", sys.table)
+	}
+	assertMissing(t, m.journal("id"))
+	assertMissing(t, m.alias("id"))
+	assertMissing(t, m.redirectTarget("id"))
+	check(t, bundle, "config.json", `{"root":{"path":"/unexpected-root"}}`)
+
+	put(t, bundle, "config.json", `{"root":{"path":"`+source+`"}}`)
+	if _, err := m.PrepareRedirected("id", source, bundle, slot, "app", ownership.Owner{}); err != nil {
+		t.Fatal(err)
+	}
+	check(t, bundle, "config.json", `{"root":{"path":"`+m.redirectTarget("id")+`"}}`)
+	sys.table[0].ID++
+	if _, err := m.PrepareRedirected("id", source, bundle, slot, "app", ownership.Owner{}); err == nil {
+		t.Fatal("reused the lower bind after the upstream mount was replaced")
+	}
+	if err := m.Cleanup("id"); err != nil {
+		t.Fatal(err)
+	}
+	assertMissing(t, m.redirectTarget("id"))
+	if _, err := os.Stat(source); err != nil {
+		t.Fatal(err)
+	}
+	check(t, bundle, "config.json", `{"root":{"path":"`+source+`"}}`)
+}
