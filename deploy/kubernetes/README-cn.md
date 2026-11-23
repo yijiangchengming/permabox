@@ -6,7 +6,7 @@ PermaBox 通过 Kubernetes `RuntimeClass`（`node.k8s.io/v1`）选择节点上�
 
 | 环境 | 安装方式 | 验证范围 |
 | --- | --- | --- |
-| 原生 Kubernetes + containerd | [手动配置目标节点](../README-cn.md) | [CI](../../.github/workflows/ci.yml) 使用基于 kubeadm 的 kind 节点验证 Kubernetes 1.35.8、1.36.4、1.37.0。 |
+| 原生 Kubernetes + containerd | [手动配置目标节点](../README-cn.md) | [CI](../../.github/workflows/ci.yml) 使用基于 kubeadm 的 kind 节点验证 Kubernetes 1.35.8、1.36.4、1.37.0，覆盖独立 rootfs 挂载、Pod 重建前后的可写 `hostPath` 与目录 `subPath`，以及清理。 |
 | systemd 管理、内置 containerd 的 K3s | [Helm 自动安装](../k3s/README-cn.md) | CI 覆盖单节点 K3s `v1.34.5+k3s1`。 |
 | 使用内置 containerd 的 RKE2 | 按下文在节点注册 | [CI](../../.github/workflows/compat-rke2.yml) 已验证单节点 `v1.37.2+rke2r1` + runc。 |
 | 使用内置 containerd 的 k0s | 按下文在节点注册 | [CI](../../.github/workflows/compat-k0s.yml) 覆盖单节点 `v1.36.4+k0s.1` + runc。 |

@@ -29,7 +29,7 @@ sudo test -x /usr/bin/runc
 
 PermaBox 会在调用运行时前拒绝不支持的 OCI 命令、无法识别的生命周期参数，以及无法读取或无效的创建配置。升级前请检查运行时的 OCI 命令兼容性。状态目录必须是运行时用户拥有的私有目录。请使用受信的上级目录，并避免在状态路径中使用符号链接。
 
-请使用由 CRI 管理的 OCI bundle，并将其置于受信任且不含符号链接的路径下。bundle 目录及普通文件 `config.json` 仅允许其受信任的所有者写入，配置上限为 4 MiB。底层运行时会在 PermaBox 检查后重新读取配置，因此整个 `create` 期间应保持配置不变。
+请使用由 CRI 管理的 OCI bundle，并将其置于受信任且不含符号链接的路径下。bundle 目录及普通文件 `config.json` 仅允许其受信任的所有者写入，配置上限为 4 MiB。对启用持久化的容器，PermaBox 将合并后的 rootfs 挂载到 `<state_dir>/<container-id>.rootfs`，在调用底层运行时前只更新 OCI 的 `root.path`，清理时恢复原值。整个过程由运行时管理 bundle。持久化数据存放在 `<storage_root>/<namespace>/<pod-name>/upper`。
 
 | 环境变量 | 用途 |
 | --- | --- |

@@ -68,7 +68,7 @@ func TestCRIOBundle(t *testing.T) {
 				}
 				return
 			}
-			if err != nil || (options.Persistence != nil) != tc.persist || options.RedirectRoot != tc.redirect {
+			if err != nil || (options.Persistence != nil) != tc.persist || options.RequireOverlay != tc.redirect {
 				t.Fatalf("got %+v, %v; want persistence=%v", options, err, tc.persist)
 			}
 			if tc.kind == "sandbox" && options.RuntimeAlias != "" {

@@ -33,6 +33,7 @@ type record struct {
 	Namespace     string           `json:"mount_namespace"`
 	Root          string           `json:"root"`
 	Source        string           `json:"source,omitempty"`
+	ConfigRoot    string           `json:"config_root,omitempty"`
 	Bundle        string           `json:"bundle,omitempty"`
 	SourceID      int              `json:"source_mount_id,omitempty"`
 	ConfigPending bool             `json:"config_redirect_pending,omitempty"`
@@ -77,18 +78,18 @@ func (m Manager) Prepare(id, root, slot, container string) (bool, error) {
 }
 
 func (m Manager) PrepareOwned(id, root, slot, container string, owner ownership.Owner) (bool, error) {
-	return m.prepare(id, root, "", slot, container, owner)
+	return m.prepare(id, root, "", "", slot, container, owner, false)
 }
 
-func (m Manager) PrepareRedirected(id, source, bundle, slot, container string, owner ownership.Owner) (bool, error) {
+func (m Manager) PrepareRedirected(id, source, bundle, configRoot, slot, container string, owner ownership.Owner, requireOverlay bool) (bool, error) {
 	bundle, err := filepath.Abs(bundle)
 	if err != nil {
 		return false, err
 	}
-	return m.prepare(id, source, bundle, slot, container, owner)
+	return m.prepare(id, source, bundle, configRoot, slot, container, owner, requireOverlay)
 }
 
-func (m Manager) prepare(id, root, bundle, slot, container string, owner ownership.Owner) (bool, error) {
+func (m Manager) prepare(id, root, bundle, configRoot, slot, container string, owner ownership.Owner, requireOverlay bool) (bool, error) {
 	if !oci.ValidID(id) {
 		return false, errors.New("invalid container ID")
 	}
@@ -122,12 +123,17 @@ func (m Manager) prepare(id, root, bundle, slot, container string, owner ownersh
 	var source string
 	var sourceID int
 	if bundle != "" {
-		if root != inputRoot || overlap(bundle, m.Dir) || overlap(bundle, slot) || overlap(bundle, root) {
-			return false, errors.New("CRI-O source, bundle, storage slot and state directory must be separate")
+		if overlap(bundle, m.Dir) || overlap(bundle, slot) || within(root, bundle) {
+			return false, errors.New("OCI bundle overlaps rootfs, storage slot or state directory")
 		}
-		sourceID, err = m.overlaySourceID(root)
-		if err != nil {
-			return false, err
+		if requireOverlay {
+			if root != inputRoot || overlap(bundle, root) {
+				return false, errors.New("CRI-O rootfs must be a separate, non-symlinked directory")
+			}
+			sourceID, err = m.overlaySourceID(root)
+			if err != nil {
+				return false, err
+			}
 		}
 		source, root = root, m.redirectTarget(id)
 	}
@@ -152,7 +158,7 @@ func (m Manager) prepare(id, root, bundle, slot, container string, owner ownersh
 		return false, err
 	}
 	identity := storageIdentity(slotInfo)
-	want := record{Namespace: ns, Root: root, Source: source, Bundle: bundle, SourceID: sourceID, Slot: slot, SlotIdentity: &identity, PendingOwner: &owner}
+	want := record{Namespace: ns, Root: root, Source: source, Bundle: bundle, ConfigRoot: configRoot, SourceID: sourceID, Slot: slot, SlotIdentity: &identity, PendingOwner: &owner}
 	encodedWant, err := json.Marshal(want)
 	if err != nil {
 		return false, err
@@ -226,7 +232,7 @@ func (m Manager) prepare(id, root, bundle, slot, container string, owner ownersh
 			if err != nil {
 				return false, err
 			}
-			if lower == 0 || lower != prev.LowerID {
+			if lower == 0 || lower != prev.LowerID || (sourceID == 0 && !sameFile(source, alias)) {
 				return false, errors.New("previous create is missing its original lower bind mount")
 			}
 		}
@@ -591,8 +597,8 @@ func (m lockedManager) cleanupLockedAt(id string, state record, now time.Time) e
 			}
 		}
 		if state.ConfigPending {
-			if _, err := oci.ReplaceBundleRoot(state.Bundle, state.Root, state.Source); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return fmt.Errorf("restore CRI-O bundle root: %w", err)
+			if _, err := oci.ReplaceBundleRoot(state.Bundle, state.Root, state.originalConfigRoot()); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("restore OCI bundle root: %w", err)
 			}
 		}
 	}
@@ -728,10 +734,10 @@ func readRecord(path string) (record, error) {
 		filepath.Clean(out.Root) != out.Root || filepath.Clean(out.Slot) != out.Slot {
 		return out, fmt.Errorf("incomplete persistence record %s", path)
 	}
-	if out.Source != "" || out.Bundle != "" || out.SourceID != 0 || out.ConfigPending {
-		if !filepath.IsAbs(out.Source) || !filepath.IsAbs(out.Bundle) || out.SourceID <= 0 ||
+	if out.Source != "" || out.Bundle != "" || out.ConfigRoot != "" || out.SourceID != 0 || out.ConfigPending {
+		if !filepath.IsAbs(out.Source) || !filepath.IsAbs(out.Bundle) || out.SourceID < 0 ||
 			filepath.Clean(out.Source) != out.Source || filepath.Clean(out.Bundle) != out.Bundle ||
-			overlap(out.Source, out.Root) || overlap(out.Bundle, out.Root) || overlap(out.Bundle, out.Source) {
+			overlap(out.Source, out.Root) || overlap(out.Bundle, out.Root) || within(out.Source, out.Bundle) {
 			return out, fmt.Errorf("invalid redirected rootfs record %s", path)
 		}
 	}

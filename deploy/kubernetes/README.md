@@ -6,7 +6,7 @@ PermaBox uses Kubernetes `RuntimeClass` (`node.k8s.io/v1`) to select a node's CR
 
 | Environment | Installation | Verification |
 | --- | --- | --- |
-| Upstream Kubernetes with containerd | [Manual node installation](../README.md) | The [CI workflow](../../.github/workflows/ci.yml) tests Kubernetes 1.35.8, 1.36.4, and 1.37.0 on kubeadm-based kind nodes. |
+| Upstream Kubernetes with containerd | [Manual node installation](../README.md) | The [CI workflow](../../.github/workflows/ci.yml) tests Kubernetes 1.35.8, 1.36.4, and 1.37.0 on kubeadm-based kind nodes, including the separate rootfs mount, writable `hostPath` and directory `subPath` across Pod replacement, and cleanup. |
 | systemd K3s with embedded containerd | [Helm installer](../k3s/README.md) | Single-node K3s `v1.34.5+k3s1` in CI. |
 | RKE2 with embedded containerd | Distribution-specific registration below | Single-node `v1.37.2+rke2r1` with runc in [CI](../../.github/workflows/compat-rke2.yml). |
 | k0s with embedded containerd | Distribution-specific registration below | [CI](../../.github/workflows/compat-k0s.yml) targets single-node `v1.36.4+k0s.1` with runc. |
