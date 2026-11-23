@@ -172,6 +172,11 @@ func (m Manager) prepare(id, root, bundle, configRoot, slot, container string, o
 		return false, err
 	}
 	if retry {
+		// A containerd create interrupted before an upgrade can finish using its
+		// existing in-place mount. New containers always use the separate rootfs.
+		if source != "" && !requireOverlay && prev.Source == "" && prev.Root == source {
+			root, source, bundle = source, "", ""
+		}
 		if prev.Namespace != ns || prev.Root != root || prev.Source != source || prev.Bundle != bundle || prev.SourceID != sourceID || prev.Slot != slot {
 			return false, errors.New("container ID already has a different persistence record")
 		}

@@ -66,3 +66,28 @@ func TestRedirectRootWithinContainerdBundle(t *testing.T) {
 	assertMissing(t, m.redirectTarget("id"))
 	check(t, bundle, "config.json", original)
 }
+
+func TestRetryLegacyContainerdRoot(t *testing.T) {
+	m, sys, source, slot := fixture(t)
+	bundle := filepath.Join(filepath.Dir(source), "bundle")
+	mkdir(t, bundle)
+	newSource := filepath.Join(bundle, "rootfs")
+	if err := os.Rename(source, newSource); err != nil {
+		t.Fatal(err)
+	}
+	source = newSource
+	sys.table[0].Target = source
+	const original = `{"root":{"path":"rootfs"}}`
+	put(t, bundle, "config.json", original)
+	if _, err := m.Prepare("id", source, slot, "app"); err != nil {
+		t.Fatal(err)
+	}
+	installed, err := m.PrepareRedirected("id", source, bundle, "rootfs", slot, "app", ownership.Owner{}, false)
+	if err != nil || installed {
+		t.Fatalf("retry installed a mount or failed: %v, %v", installed, err)
+	}
+	check(t, bundle, "config.json", original)
+	if err := m.Cleanup("id"); err != nil {
+		t.Fatal(err)
+	}
+}
