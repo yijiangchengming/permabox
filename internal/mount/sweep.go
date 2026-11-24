@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -24,6 +25,11 @@ const (
 	scaleDownMarker = ".permabox-scale-down.json"
 	scaleDownGrace  = time.Minute
 )
+
+func sameOwner(a, b ownership.Owner) bool {
+	return a.Namespace == b.Namespace && a.Kind == b.Kind && a.Name == b.Name && a.UID == b.UID &&
+		a.Overrides == b.Overrides && slices.Equal(a.Excludes, b.Excludes)
+}
 
 type ReclaimReason uint8
 
@@ -99,7 +105,7 @@ func (m Manager) retireApproved(roots []string, target string, now time.Time, ap
 	var stageErr error
 	err := m.sweep(roots, target, 0, now, deadline, func(s ReleasedSlot) bool {
 		a, ok := byPath[s.path]
-		if !ok || s.identity != a.identity || s.owner != a.owner || !s.at.Equal(a.at) || !os.SameFile(s.file, a.file) {
+		if !ok || s.identity != a.identity || !sameOwner(s.owner, a.owner) || !s.at.Equal(a.at) || !os.SameFile(s.file, a.file) {
 			return false
 		}
 		if generation == 0 {
@@ -180,7 +186,7 @@ func (m lockedManager) sweepLocked(roots []string, target string, ttl time.Durat
 		}
 		terminal := !state.ReleasedAt.IsZero()
 		if target == "" && state.Namespace == ns && (terminal ||
-			(now.Sub(info.ModTime()) >= staleAge && staleRoot(state.Root, mounts))) {
+			(now.Sub(info.ModTime()) >= staleAge && staleRoot(state, m.alias(id), mounts))) {
 			var err error
 			if terminal {
 				err = m.releaseLocked(id, state, now)
@@ -235,14 +241,16 @@ func (m lockedManager) sweepLocked(roots []string, target string, ttl time.Durat
 	return retired, result
 }
 
-func staleRoot(root string, mounts []entry) bool {
-	// The journal only records rootfs. Require its containing directory to
-	// be gone as well, so an existing bundle with a missing rootfs is kept.
-	if !errors.Is(realDir(filepath.Dir(root)), os.ErrNotExist) {
+func staleRoot(state record, alias string, mounts []entry) bool {
+	bundle := state.Bundle
+	if bundle == "" {
+		bundle = filepath.Dir(state.Root)
+	}
+	if !errors.Is(realDir(bundle), os.ErrNotExist) {
 		return false
 	}
 	for _, mount := range mounts {
-		if within(root, mount.Target) {
+		if within(state.Root, mount.Target) || (state.Source != "" && within(alias, mount.Target)) {
 			return false
 		}
 	}

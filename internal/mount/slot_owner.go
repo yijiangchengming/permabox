@@ -143,5 +143,6 @@ func bindSlotOwner(slot string, owner ownership.Owner) error {
 		return nil // Only the low-level mount API can prepare an unowned layer.
 	}
 	owner.Overrides = ownership.Overrides{}
+	owner.Excludes = nil
 	return writeRecord(path, owner)
 }

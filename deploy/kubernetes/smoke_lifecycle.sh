@@ -24,7 +24,7 @@ gc_removed() { gc && removed; }
 gc_staged() { gc && node_exec test -f "$slot/.permabox-scale-down.json"; }
 
 smoke_lifecycle() {
-  local slot=/var/lib/permabox/storage/$ns/$pod original
+  local slot=/var/lib/permabox/storage/$ns/$pod original id journal root source scratch
   k label node "$node" "${bridge_node_label:-permabox.io.node-restriction.kubernetes.io/pinned}=true"
   if [[ -n ${runtime_class_node_label:-} ]]; then
     k label node "$node" "$runtime_class_node_label=true"
@@ -40,12 +40,66 @@ smoke_lifecycle() {
     app apply -f deploy/statefulset.yaml
   fi
   app patch statefulset permabox-demo --type=merge -p '{"spec":{"template":{"spec":{"terminationGracePeriodSeconds":1}}}}'
+  if [[ ${check_containerd_mounts:-false} == true ]]; then
+    node_exec install -d -m 0755 /var/lib/permabox-ci-volumes/nested
+    app patch statefulset permabox-demo --type=strategic -p '
+spec:
+  template:
+    spec:
+      volumes:
+        - name: host-data
+          hostPath:
+            path: /var/lib/permabox-ci-volumes
+            type: Directory
+      containers:
+        - name: demo
+          volumeMounts:
+            - name: host-data
+              mountPath: /host-data
+            - name: host-data
+              mountPath: /subpath-data
+              subPath: nested'
+  fi
+  if [[ ${check_exclusions:-false} == true ]]; then
+    app patch statefulset permabox-demo --type=merge -p '{"spec":{"template":{"metadata":{"annotations":{"permabox.io/persist-exclude":"/tmp,/etc/apk"}}}}}'
+  fi
   app rollout status statefulset/permabox-demo --timeout=120s
   wait_for new_pod ''
   ready
   original=$(uid)
   app exec "$pod" -c demo -- sh -ec 'test -f /etc/inittab; rm /etc/inittab; echo permabox >> /etc/alpine-release; echo persisted > /etc/permabox-marker'
   node_exec test -f "$slot/upper/etc/permabox-marker"
+  if [[ ${check_containerd_mounts:-false} == true ]]; then
+    id=$(app get pod "$pod" -o jsonpath='{.status.containerStatuses[?(@.name=="demo")].containerID}')
+    [[ $id =~ ^containerd://[a-f0-9]{64}$ ]]
+    id=${id#containerd://}
+    journal=/run/permabox/$id.json
+    root=$(node_exec cat "$journal" | jq -er '.root')
+    source=$(node_exec cat "$journal" | jq -er '.source')
+    [[ $root == "/run/permabox/$id.rootfs" && $source == */"$id"/rootfs ]]
+    node_exec findmnt --mountpoint "$root" --types overlay
+    node_exec findmnt --mountpoint "$source"
+    node_exec test ! -e "$source/etc/permabox-marker"
+    app exec "$pod" -c demo -- sh -ec 'echo host-data >/host-data/marker; echo subpath-data >/subpath-data/marker'
+  fi
+  if [[ ${check_exclusions:-false} == true ]]; then
+    id=$(app get pod "$pod" -o jsonpath='{.status.containerStatuses[?(@.name=="demo")].containerID}')
+    id=${id#*://}
+    [[ $id =~ ^[a-f0-9]{64}$ ]]
+    journal=/run/permabox/$id.json
+    root=$(node_exec cat "$journal" | jq -er '.root')
+    [[ $root == "/run/permabox/$id.rootfs" ]]
+    node_exec findmnt --mountpoint "$root/tmp" --types overlay
+    node_exec findmnt --mountpoint "$root/etc/apk" --types overlay
+    scratch=$(node_exec cat "$journal" | jq -er '.exclusion_mounts[] | select(.path=="tmp") | .scratch')
+    app exec "$pod" -c demo -- sh -ec '
+      test -s /etc/apk/repositories
+      test -k /tmp
+      echo temporary >/tmp/permabox-excluded
+      rm /etc/apk/repositories
+    '
+    node_exec test ! -e "$slot/upper/tmp/permabox-excluded"
+  fi
   app delete pod "$pod" --wait=false
   wait_for new_pod "$original"
   ready
@@ -55,6 +109,21 @@ smoke_lifecycle() {
     grep -Fxq permabox /etc/alpine-release || { echo "/etc/alpine-release modification did not persist" >&2; exit 1; }
     test "$(cat /etc/permabox-marker)" = persisted || { echo "/etc/permabox-marker creation did not persist" >&2; exit 1; }
   '
+
+  if [[ ${check_containerd_mounts:-false} == true ]]; then
+    node_exec test ! -e "$journal"
+    node_exec test ! -e "$root"
+    node_exec test ! -e "/run/permabox/$id.lower"
+    app exec "$pod" -c demo -- grep -Fx host-data /host-data/marker
+    app exec "$pod" -c demo -- grep -Fx subpath-data /subpath-data/marker
+  fi
+
+  if [[ ${check_exclusions:-false} == true ]]; then
+    app exec "$pod" -c demo -- sh -ec 'test ! -e /tmp/permabox-excluded; test -s /etc/apk/repositories'
+    wait_for node_exec test ! -e "$journal"
+    node_exec test ! -e "$root"
+    node_exec test ! -e "$scratch"
+  fi
 
   app patch statefulset permabox-demo --type=merge -p '{"spec":{"template":{"metadata":{"annotations":{"permabox.io/gc-on-scale-to-zero":"false"}}}}}'
   app rollout status statefulset/permabox-demo --timeout=120s
@@ -89,4 +158,8 @@ smoke_lifecycle() {
   app delete statefulset permabox-demo --cascade=foreground --wait=false
   wait_for stopped
   wait_for gc_removed
+  if [[ ${check_containerd_mounts:-false} == true ]]; then
+    node_exec grep -Fx host-data /var/lib/permabox-ci-volumes/marker
+    node_exec grep -Fx subpath-data /var/lib/permabox-ci-volumes/nested/marker
+  fi
 }

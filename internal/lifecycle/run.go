@@ -45,7 +45,12 @@ func Run(cfg config.Config, manager mount.Manager, args []string, report func(st
 	var executable string
 	switch inv.Command {
 	case "create":
-		options, err := oci.InspectBundle(inv.Bundle, cfg.Annotation)
+		target, source, err := manager.RedirectedRoot(inv.ID, inv.Bundle)
+		if err != nil {
+			report("create %s: read redirected rootfs: %v", inv.ID, err)
+			return 1
+		}
+		options, err := oci.InspectBundleWithRoot(inv.Bundle, cfg.Annotation, target, source)
 		if err != nil {
 			report("create %s: inspect bundle: %v", inv.ID, err)
 			return 1
@@ -99,7 +104,7 @@ func Run(cfg config.Config, manager mount.Manager, args []string, report func(st
 					report("create %s: %v", inv.ID, lookupErr)
 					return 1
 				}
-				installed, err = manager.PrepareOwned(inv.ID, bundle.Root, slot, bundle.Container, owner)
+				installed, err = manager.PrepareRedirected(inv.ID, bundle.Root, inv.Bundle, options.RootPath, slot, bundle.Container, owner, options.RequireOverlay, options.RootReadonly)
 				if err != nil {
 					managed, inspectErr := manager.Managed(inv.ID)
 					if pinnedNow && !managed && inspectErr == nil {

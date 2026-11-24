@@ -29,7 +29,7 @@ sudo test -x /usr/bin/runc
 
 PermaBox 会在调用运行时前拒绝不支持的 OCI 命令、无法识别的生命周期参数，以及无法读取或无效的创建配置。升级前请检查运行时的 OCI 命令兼容性。状态目录必须是运行时用户拥有的私有目录。请使用受信的上级目录，并避免在状态路径中使用符号链接。
 
-请使用由 CRI 管理的 OCI bundle，并将其置于受信任且不含符号链接的路径下。bundle 目录及普通文件 `config.json` 仅允许其受信任的所有者写入，配置上限为 4 MiB。底层运行时会在 PermaBox 检查后重新读取配置，因此整个 `create` 期间应保持配置不变。
+请使用由 CRI 管理的 OCI bundle，并将其置于受信任且不含符号链接的路径下。bundle 目录及普通文件 `config.json` 仅允许其受信任的所有者写入，配置上限为 4 MiB。对启用持久化的容器，PermaBox 将合并后的 rootfs 挂载到 `<state_dir>/<container-id>.rootfs`，在调用底层运行时前只更新 OCI 的 `root.path`，清理时恢复原值。整个过程由运行时管理 bundle。持久化数据存放在 `<storage_root>/<namespace>/<pod-name>/upper`。
 
 | 环境变量 | 用途 |
 | --- | --- |
@@ -77,6 +77,10 @@ underlying_runtimes:
 若 2.x 实例仍使用 v2 配置，先用 `containerd --config /etc/containerd/config.toml config migrate` 生成迁移结果，审查主配置及其 `imports`（该命令不会逐个迁移子配置），再合并 v3 片段；不要只改 `version` 数字。`SystemdCgroup = true` 适用于使用 `systemd` 驱动的节点；按现有运行时及 kubelet 的配置设置该值。`BinaryName` 指向包装器，`runtime_type` 仍使用 runc v2 shim。
 
 `pod_annotations` 是从 Pod 转发到 OCI spec 的键白名单。如果更改 `persist_annotation`，同步修改白名单和 StatefulSet 的 Pod 模板注解；启用值仍为字符串 `"true"`。PermaBox 跳过 CRI sandbox，只为符合条件的业务容器挂载持久化层。建议使用示例中的固定注解 `permabox.io/container: demo` 指定单个容器名；如 Pod 内有多个容器，不要让它们共用以命名空间和 Pod 名为键的可写层。
+
+如需让指定目录不跨 Pod 重建保留，可在 Pod 模板添加 `permabox.io/persist-exclude`，值为以逗号分隔的规范绝对路径，例如 `/tmp,/var/cache`。每个路径必须对应镜像中已存在的目录，并且在可写 rootfs 中也是实际目录。拒绝 `/`、逗号、`.` 或 `..` 路径段以及互相重叠的路径。PermaBox 会为每个目录挂载临时 OverlayFS，镜像中的内容（包括特殊文件）仍可见，运行期间的写入则只进入临时层。该注解由工作负载桥接从 Pod 元数据读取，无需加入 containerd 的 `pod_annotations` 白名单。同一容器内的排除目录共用一个独立的 tmpfs，上限为 4096 MiB 和 4096 个 inode，OverlayFS 元数据也计入用量。达到任一上限后，写入可能返回 `ENOSPC`。容器设置 `readOnlyRootFilesystem: true` 时，PermaBox 会以只读方式挂载排除目录。设置注解前已持久化的旧目录内容会被隐藏；移除注解后可能重新出现。
+
+升级后请重建已使用该注解的容器，以应用新的挂载设置。若要降级到尚未使用 tmpfs 存放排除目录写层的版本，请先用升级后的运行时停止并删除这些容器，以清理挂载。
 
 在维护窗口内检查配置，再重启并确认 CRI 可用。以下以 systemd 和默认配置路径为例；`crictl` 需指向 kubelet 使用的同一个 CRI 端点。
 

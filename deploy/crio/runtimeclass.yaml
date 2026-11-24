@@ -6,4 +6,4 @@ handler: permabox
 scheduling:
   nodeSelector:
     kubernetes.io/os: linux
-    permabox.io.node-restriction.kubernetes.io/crio-vfs: "true"
+    permabox.io.node-restriction.kubernetes.io/crio-overlay: "true"

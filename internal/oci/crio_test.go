@@ -30,13 +30,14 @@ func TestCRIOBundle(t *testing.T) {
 	layer := strings.Repeat("a", 64)
 	for _, tc := range []struct {
 		name, kind, container, root string
-		persist, invalid            bool
+		persist, invalid, redirect  bool
 	}{
-		{"selected", "container", "app", "/storage/vfs/dir/" + layer, true, false},
-		{"sandbox", "sandbox", "POD", "/storage/overlay/" + layer + "/merged", false, false},
-		{"sidecar", "container", "sidecar", "/storage/overlay/" + layer + "/merged", false, false},
-		{"overlay rejected", "container", "app", "/storage/overlay/" + layer + "/merged", false, true},
-		{"relative root rejected", "container", "app", "vfs/dir/" + layer, false, true},
+		{"VFS rejected", "container", "app", "/storage/vfs/dir/" + layer, false, true, false},
+		{"sandbox", "sandbox", "POD", "/storage/overlay/" + layer + "/merged", false, false, false},
+		{"sidecar", "container", "sidecar", "/storage/overlay/" + layer + "/merged", false, false, false},
+		{"overlay redirected", "container", "app", "/storage/overlay/" + layer + "/merged", true, false, true},
+		{"unsupported root rejected", "container", "app", "/storage/overlay/" + layer + "/diff", false, true, false},
+		{"relative root rejected", "container", "app", "vfs/dir/" + layer, false, true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			bundle := t.TempDir()
@@ -67,7 +68,7 @@ func TestCRIOBundle(t *testing.T) {
 				}
 				return
 			}
-			if err != nil || (options.Persistence != nil) != tc.persist {
+			if err != nil || (options.Persistence != nil) != tc.persist || options.RequireOverlay != tc.redirect {
 				t.Fatalf("got %+v, %v; want persistence=%v", options, err, tc.persist)
 			}
 			if tc.kind == "sandbox" && options.RuntimeAlias != "" {

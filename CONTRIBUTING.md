@@ -47,7 +47,7 @@ docker run --rm --entrypoint /usr/local/lib/permabox/permabox \
 
 In a pull request, describe what changed, how you verified it, and any change in how nodes, writable layers, or existing Helm installations are handled. Do not include kubeconfigs, node data, tokens, or logs containing credentials.
 
-GitHub Actions imports the installer image built from the current checkout into a single-node K3s cluster. The smoke test covers Helm installation, persistence after StatefulSet Pod replacement, data reclamation after scaling to zero or deleting the StatefulSet, and runtime removal. Image releases run the same CI checks before publishing.
+GitHub Actions runs `govulncheck` on the Linux amd64 and arm64 binaries exported from the installer Dockerfile. It also imports the locally built installer image into a single-node K3s cluster to test Helm installation, persistence after StatefulSet Pod replacement, data reclamation after scaling to zero or deleting the StatefulSet, and runtime removal. Image releases must pass these checks before publishing.
 
 ## Release an installer image
 

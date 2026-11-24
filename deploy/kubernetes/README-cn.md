@@ -6,12 +6,12 @@ PermaBox 通过 Kubernetes `RuntimeClass`（`node.k8s.io/v1`）选择节点上�
 
 | 环境 | 安装方式 | 验证范围 |
 | --- | --- | --- |
-| 原生 Kubernetes + containerd | [手动配置目标节点](../README-cn.md) | [CI](../../.github/workflows/ci.yml) 使用基于 kubeadm 的 kind 节点验证 Kubernetes 1.35.8、1.36.4、1.37.0。 |
+| 原生 Kubernetes + containerd | [手动配置目标节点](../README-cn.md) | [CI](../../.github/workflows/ci.yml) 使用基于 kubeadm 的 kind 节点验证 Kubernetes 1.35.8、1.36.4、1.37.0，覆盖独立 rootfs 挂载、Pod 重建前后的可写 `hostPath` 与目录 `subPath`，以及清理。 |
 | systemd 管理、内置 containerd 的 K3s | [Helm 自动安装](../k3s/README-cn.md) | CI 覆盖单节点 K3s `v1.34.5+k3s1`。 |
 | 使用内置 containerd 的 RKE2 | 按下文在节点注册 | [CI](../../.github/workflows/compat-rke2.yml) 已验证单节点 `v1.37.2+rke2r1` + runc。 |
 | 使用内置 containerd 的 k0s | 按下文在节点注册 | [CI](../../.github/workflows/compat-k0s.yml) 覆盖单节点 `v1.36.4+k0s.1` + runc。 |
 | 使用 containerd 的 MicroK8s | 按下文在节点注册 | 提供手动接入方式，暂无端到端测试。 |
-| 使用 VFS 的 CRI-O | [独立节点安装与版本配对](../crio/README-cn.md) | [兼容性工作流](../../.github/workflows/compat-crio.yml) 使用同版本的 Kubernetes 和 CRI-O：1.34.0、1.35.8、1.36.4、1.37.0，底层运行时为 runc。不支持默认 overlay 驱动。 |
+| 使用原生 overlay 的 CRI-O | [独立节点安装与版本配对](../crio/README-cn.md) | [兼容性工作流](../../.github/workflows/compat-crio.yml) 使用同版本的 Kubernetes 和 CRI-O：1.34.0、1.35.8、1.36.4、1.37.0，底层运行时为 runc。CI 验证 rootfs 持久化、可写 `hostPath` 与目录 `subPath` 挂载，以及分别执行停止和删除。 |
 | 托管 Kubernetes | 仅在允许修改节点配置和注册自定义 CRI 处理器的 Linux 节点池手动接入 | 需用实际节点镜像验证；受限及无服务器节点池不在当前安装范围内。 |
 
 CI 矩阵之外的 Kubernetes 版本尚未验证。节点还需满足 Kubernetes 上游的 CRI 与版本要求。containerd 配置 v2 和 v3 指的是 TOML 格式，与 Kubernetes 版本或 containerd 大版本不是同一个概念。

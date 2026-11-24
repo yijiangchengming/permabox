@@ -3,12 +3,15 @@
 package mount
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/yijiangchengming/permabox/internal/oci"
 	"github.com/yijiangchengming/permabox/internal/ownership"
 )
 
@@ -25,11 +28,19 @@ func TestKernelPersistence(t *testing.T) {
 	m := New(filepath.Join(base, "state"))
 	image := filepath.Join(base, "image")
 	mkdir(t, image)
+	mkdir(t, filepath.Join(image, "ephemeral"))
+	mkdir(t, filepath.Join(image, "cache"))
 	put(t, image, "edited", "from image")
 	put(t, image, "deleted", "image file")
+	put(t, image, "ephemeral/base", "image baseline")
+	if err := syscall.Mkfifo(filepath.Join(image, "ephemeral", "pipe"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	slot := filepath.Join(base, "storage", "default", "app-0")
 	roots := []string{filepath.Dir(filepath.Dir(slot))}
-	owner := ownership.Owner{Namespace: "default", Name: "app", Kind: "StatefulSet", UID: "workload-uid"}
+	owner := ownership.Owner{Namespace: "default", Name: "app", Kind: "StatefulSet", UID: "workload-uid", Excludes: []string{"/ephemeral"}}
+	storedOwner := owner
+	storedOwner.Excludes = nil
 	for _, id := range []string{"first", "replacement"} {
 		func() {
 			bundle := filepath.Join(base, id)
@@ -67,15 +78,20 @@ func TestKernelPersistence(t *testing.T) {
 			if info, err := os.Stat(root); err != nil || info.Mode().Perm() != 0751 {
 				t.Fatalf("rootfs permissions changed after installing upper: %v, %v", info, err)
 			}
+			if info, err := os.Lstat(filepath.Join(root, "ephemeral", "pipe")); err != nil || info.Mode()&os.ModeNamedPipe == 0 {
+				t.Fatalf("excluded FIFO not visible: %v, %v", info, err)
+			}
 			if id == "first" {
 				put(t, root, "edited", "persisted edit")
 				put(t, root, "created", "persisted addition")
+				put(t, root, "ephemeral/base", "ephemeral edit")
 				if err := os.Remove(filepath.Join(root, "deleted")); err != nil {
 					t.Fatal(err)
 				}
 			} else {
 				check(t, root, "edited", "persisted edit")
 				check(t, root, "created", "persisted addition")
+				check(t, root, "ephemeral/base", "image baseline")
 				if _, err := os.Stat(filepath.Join(root, "deleted")); !os.IsNotExist(err) {
 					t.Fatalf("whiteout did not survive: %v", err)
 				}
@@ -86,7 +102,7 @@ func TestKernelPersistence(t *testing.T) {
 			}
 			now := time.Now()
 			candidates, err := m.DiscoverReleased(roots, released, 0, now)
-			if err != nil || len(candidates) != 1 || candidates[0].Owner() != owner {
+			if err != nil || len(candidates) != 1 || !reflect.DeepEqual(candidates[0].Owner(), storedOwner) {
 				t.Fatalf("discover = %+v, %v", candidates, err)
 			}
 			// The first release is kept so its replacement can reuse the layer.
@@ -108,6 +124,101 @@ func TestKernelPersistence(t *testing.T) {
 	if _, err := os.Stat(slot); !os.IsNotExist(err) {
 		t.Fatalf("released slot still exists after immediate reclaim: %v", err)
 	}
+	t.Run("CRI-O replaces merged before OCI delete", func(t *testing.T) {
+		const id = "crio"
+		bundle := filepath.Join(base, "crio-bundle")
+		driver := filepath.Join(base, "crio-storage")
+		source := filepath.Join(driver, "merged")
+		upper := filepath.Join(driver, "upper")
+		work := filepath.Join(driver, "work")
+		for _, dir := range []string{bundle, source, upper, work} {
+			mkdir(t, dir)
+		}
+		put(t, bundle, "config.json", `{"root":{"path":"`+source+`"},"mounts":[]}`)
+		opts := "lowerdir=" + image + ",upperdir=" + upper + ",workdir=" + work
+		if err := syscall.Mount("overlay", source, "overlay", 0, opts); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = syscall.Unmount(source, syscall.MNT_DETACH) })
+		target := filepath.Join(m.Dir, id+".rootfs")
+		t.Cleanup(func() { _ = syscall.Unmount(target, syscall.MNT_DETACH) })
+		t.Cleanup(func() { _ = syscall.Unmount(m.alias(id), syscall.MNT_DETACH) })
+		withTwoExclusions := owner
+		withTwoExclusions.Excludes = []string{"/ephemeral", "/cache"}
+		if _, err := m.PrepareRedirected(id, source, bundle, source, slot, "app", withTwoExclusions, true, false); err != nil {
+			t.Fatal(err)
+		}
+		put(t, target, "created", "retained write")
+		put(t, target, "ephemeral/base", "temporary write")
+		state, err := readRecord(m.journal(id))
+		if err != nil || len(state.ExclusionMounts) != 2 {
+			t.Fatalf("temporary mount journal = %+v, %v", state.ExclusionMounts, err)
+		}
+		var scratch syscall.Statfs_t
+		if err := syscall.Statfs(state.ExclusionMounts[0].Scratch, &scratch); err != nil {
+			t.Fatal(err)
+		}
+		if scratch.Type != 0x01021994 || scratch.Blocks*uint64(scratch.Bsize) != 4096<<20 || scratch.Files != 4096 {
+			t.Errorf("scratch filesystem type=%#x, bytes=%d, inodes=%d", scratch.Type, scratch.Blocks*uint64(scratch.Bsize), scratch.Files)
+		}
+		var otherScratch syscall.Statfs_t
+		if err := syscall.Statfs(state.ExclusionMounts[1].Scratch, &otherScratch); err != nil || otherScratch.Fsid != scratch.Fsid {
+			t.Fatalf("exclusions must share the same filesystem: %v, %v", otherScratch.Fsid, err)
+		}
+		assertMissing(t, filepath.Join(source, "created"))
+		if err := syscall.Unmount(source, syscall.MNT_DETACH); err != nil {
+			t.Fatal(err)
+		}
+		replacement := filepath.Join(driver, "merged.1")
+		mkdir(t, replacement)
+		if err := syscall.Rename(replacement, source); err != nil {
+			t.Fatal(err)
+		}
+		check(t, target, "edited", "from image")
+		check(t, target, "created", "retained write")
+		check(t, target, "ephemeral/base", "temporary write")
+		if err := m.Cleanup(id); err != nil {
+			t.Fatal(err)
+		}
+		assertMissing(t, target)
+		assertMissing(t, m.alias(id))
+		assertMissing(t, state.ExclusionPool)
+		assertMissing(t, filepath.Join(slot, "upper", "ephemeral", "base"))
+		check(t, filepath.Join(slot, "upper"), "created", "retained write")
+	})
+	t.Run("read-only root retains image contents in exclusions", func(t *testing.T) {
+		const id = "readonly"
+		bundle := filepath.Join(base, id)
+		mkdir(t, bundle)
+		put(t, bundle, "config.json", `{"root":{"path":"rootfs","readonly":true},"annotations":{"io.kubernetes.cri.sandbox-namespace":"default","io.kubernetes.cri.sandbox-name":"app-0","permabox.io/persist":"true"}}`)
+		source := filepath.Join(bundle, "rootfs")
+		mkdir(t, filepath.Join(source, "ephemeral"))
+		put(t, source, "ephemeral/base", "image baseline")
+		mkdir(t, filepath.Join(slot, "upper", "ephemeral"))
+		put(t, filepath.Join(slot, "upper"), "ephemeral/base", "old persisted data")
+		opts, err := oci.InspectBundle(bundle, "permabox.io/persist")
+		if err != nil || opts.Persistence == nil {
+			t.Fatalf("inspect bundle: %+v, %v", opts, err)
+		}
+		if _, err := m.PrepareRedirected(id, opts.Persistence.Root, bundle, opts.RootPath, slot, "app", owner, opts.RequireOverlay, opts.RootReadonly); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = m.Cleanup(id) })
+		target := filepath.Join(m.redirectTarget(id), "ephemeral")
+		check(t, target, "base", "image baseline")
+		if err := os.WriteFile(filepath.Join(target, "base"), []byte("blocked"), 0600); !errors.Is(err, syscall.EROFS) {
+			t.Fatalf("write to excluded directory: %v, want EROFS", err)
+		}
+		if _, err := m.PrepareRedirected(id, source, bundle, opts.RootPath, slot, "app", owner, false, false); err == nil {
+			t.Fatal("accepted retry with changed rootfs mode")
+		}
+		if err := m.Cleanup(id); err != nil {
+			t.Fatal(err)
+		}
+		assertMissing(t, m.redirectTarget(id))
+		assertMissing(t, m.exclusionPool(id))
+		check(t, filepath.Join(slot, "upper"), "ephemeral/base", "old persisted data")
+	})
 	t.Run("retirement does not cross bind mounts", func(t *testing.T) {
 		prepareReleasedSlot(t, slot, time.Now())
 		parked, err := retireSlot(slot, time.Time{})

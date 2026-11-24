@@ -6,12 +6,12 @@ PermaBox uses Kubernetes `RuntimeClass` (`node.k8s.io/v1`) to select a node's CR
 
 | Environment | Installation | Verification |
 | --- | --- | --- |
-| Upstream Kubernetes with containerd | [Manual node installation](../README.md) | The [CI workflow](../../.github/workflows/ci.yml) tests Kubernetes 1.35.8, 1.36.4, and 1.37.0 on kubeadm-based kind nodes. |
+| Upstream Kubernetes with containerd | [Manual node installation](../README.md) | The [CI workflow](../../.github/workflows/ci.yml) tests Kubernetes 1.35.8, 1.36.4, and 1.37.0 on kubeadm-based kind nodes, including the separate rootfs mount, writable `hostPath` and directory `subPath` across Pod replacement, and cleanup. |
 | systemd K3s with embedded containerd | [Helm installer](../k3s/README.md) | Single-node K3s `v1.34.5+k3s1` in CI. |
 | RKE2 with embedded containerd | Distribution-specific registration below | Single-node `v1.37.2+rke2r1` with runc in [CI](../../.github/workflows/compat-rke2.yml). |
 | k0s with embedded containerd | Distribution-specific registration below | [CI](../../.github/workflows/compat-k0s.yml) targets single-node `v1.36.4+k0s.1` with runc. |
 | MicroK8s with containerd | Distribution-specific registration below | Manual integration; no end-to-end test. |
-| CRI-O with VFS | [Dedicated node setup and version pairs](../crio/README.md) | [Compatibility workflow](../../.github/workflows/compat-crio.yml): matching Kubernetes and CRI-O pairs at 1.34.0, 1.35.8, 1.36.4 and 1.37.0 with runc. The default overlay driver is unsupported. |
+| CRI-O with native overlay | [Dedicated node setup and version pairs](../crio/README.md) | [Compatibility workflow](../../.github/workflows/compat-crio.yml): matching Kubernetes and CRI-O pairs at 1.34.0, 1.35.8, 1.36.4 and 1.37.0 with runc. CI tests rootfs persistence, writable `hostPath` and directory `subPath` mounts, and separate stop and remove operations. |
 | Managed Kubernetes | Manual registration on Linux node pools that permit custom CRI handlers and node configuration | Validate against the exact node image. Restricted and serverless pools are outside the supported installation model. |
 
 Kubernetes versions outside the CI matrix are unverified. A working Kubernetes/runtime combination must also meet the upstream Kubernetes CRI and version requirements. Containerd configuration v2/v3 refers to the TOML format, not the Kubernetes version or the containerd major version.
