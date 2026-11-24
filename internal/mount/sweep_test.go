@@ -65,6 +65,40 @@ func TestSweepWorkloadProtectsReusedAndUntrackedSlots(t *testing.T) {
 	}
 }
 
+func TestReleasedSlotPreservesWorkloadGCOverrides(t *testing.T) {
+	m, _, root, slot := fixture(t)
+	if err := os.Mkdir(filepath.Join(root, "cache"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	overrides := ownership.Overrides{Delete: "false", Zero: "true"}
+	owner := ownership.Owner{
+		Namespace: "namespace", Kind: "StatefulSet", Name: "app", UID: "app-uid",
+		Overrides: overrides, Excludes: []string{"/cache"},
+	}
+	if _, err := m.PrepareOwned("id", root, slot, "app", owner); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.ActivateOwnership("id"); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Cleanup("id"); err != nil {
+		t.Fatal(err)
+	}
+
+	roots := []string{filepath.Dir(filepath.Dir(slot))}
+	candidates, err := m.DiscoverReleased(roots, "", 0, time.Now())
+	if err != nil || len(candidates) != 1 {
+		t.Fatalf("discover released slots: got %d, want 1 (error: %v)", len(candidates), err)
+	}
+	saved := candidates[0].Owner()
+	if saved.Overrides != overrides {
+		t.Errorf("released GC overrides = %+v, want %+v", saved.Overrides, overrides)
+	}
+	if len(saved.Excludes) != 0 {
+		t.Errorf("released owner includes mount exclusions: %v", saved.Excludes)
+	}
+}
+
 func TestFailedCreatePreservesOwner(t *testing.T) {
 	m, _, root, slot := fixture(t)
 	roots := []string{filepath.Dir(filepath.Dir(slot))}

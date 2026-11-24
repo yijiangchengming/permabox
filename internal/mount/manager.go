@@ -408,7 +408,6 @@ func (m lockedManager) commitSlotOwnership(id string, state record, slot string)
 		return nil
 	}
 	owner := *state.PendingOwner
-	owner.Overrides = ownership.Overrides{}
 	owner.Excludes = nil
 	if err := confirmSlotUse(slot, id, owner); err != nil {
 		return err

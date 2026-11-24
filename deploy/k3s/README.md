@@ -117,6 +117,8 @@ spec:
 
 Both annotations accept the strings `"true"` and `"false"`. Omit an annotation to inherit its Helm default. Invalid values are treated as `"false"`. PermaBox reads these annotations when creating the container and stores them with the writable layer. Template changes apply to newly created containers; released layers that have not been reused keep their recorded settings. The annotations override only their matching workload policies. `gcIdleTTL` still applies independently.
 
+When upgrading from a runtime version that dropped these overrides, affected layers inherit the node defaults until a newly created container successfully starts with the layer and records its workload settings.
+
 ## Troubleshoot installation
 
 The installer detects whether the generated containerd config uses version 2 or 3 and changes only its managed block in `config.toml.tmpl` or `config-v3.toml.tmpl`. Installation fails if another mechanism has already registered a runtime named `permabox`. Check `kubectl -n permabox-system logs daemonset/permabox-installer -c installer` for errors. On a multi-node deployment, check the installer Pod logs for the affected node.
