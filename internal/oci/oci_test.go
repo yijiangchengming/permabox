@@ -138,3 +138,15 @@ func TestBundleSelection(t *testing.T) {
 		})
 	}
 }
+
+func TestInspectBundlePreservesReadonlyRoot(t *testing.T) {
+	bundle := t.TempDir()
+	spec := `{"root":{"path":"rootfs","readonly":true},"annotations":{"io.kubernetes.cri.sandbox-namespace":"default","io.kubernetes.cri.sandbox-name":"app-0","permabox.io/persist":"true"}}`
+	if err := os.WriteFile(filepath.Join(bundle, "config.json"), []byte(spec), 0600); err != nil {
+		t.Fatal(err)
+	}
+	options, err := InspectBundle(bundle, "permabox.io/persist")
+	if err != nil || options.Persistence == nil || !options.RootReadonly {
+		t.Fatalf("inspect read-only root: %+v, %v", options, err)
+	}
+}

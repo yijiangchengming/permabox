@@ -6,7 +6,7 @@
 
 集群须允许安装器在专用命名空间使用特权 Pod、hostPID 和宿主机挂载。默认要求按 hostname 选定单个节点。设置 `allowParallelInstall=true` 后可以使用其他节点标签，首次安装时多个匹配节点可能同时重启 K3s；请安排维护窗口，避免同时重启多个控制平面节点。该 Chart 不适用于 rootless K3s、容器内运行且没有相应 systemd 单元的 K3s，或外接 containerd 的配置。
 
-如需让指定目录不跨 Pod 重建保留，请在 Pod 模板上设置 `permabox.io/persist-exclude`，值为以逗号分隔的容器内规范绝对路径，例如 `/tmp,/var/cache`。每个路径必须对应镜像中已存在的目录，并且在可写 rootfs 中也是实际目录。拒绝 `/`、逗号、`.` 或 `..` 路径段以及互相重叠的路径。PermaBox 会在每个路径上挂载临时 OverlayFS，镜像内容（包括特殊文件）仍可见，运行期间的写入则进入临时层。设置注解前已持久化的旧目录内容会被隐藏；移除注解后可能重新出现。
+如需让指定目录不跨 Pod 重建保留，请在 Pod 模板上设置 `permabox.io/persist-exclude`，值为以逗号分隔的容器内规范绝对路径，例如 `/tmp,/var/cache`。每个路径必须对应镜像中已存在的目录，并且在可写 rootfs 中也是实际目录。拒绝 `/`、逗号、`.` 或 `..` 路径段以及互相重叠的路径。PermaBox 会在每个路径上挂载临时 OverlayFS，镜像内容（包括特殊文件）仍可见，运行期间的写入则进入临时层。同一容器内的排除目录共用一个上限为 4096 MiB 和 4096 个 inode 的 tmpfs。容器设置 `readOnlyRootFilesystem: true` 时，PermaBox 会以只读方式挂载排除目录。设置注解前已持久化的旧目录内容会被隐藏；移除注解后可能重新出现。
 
 ## 准备安装器镜像
 

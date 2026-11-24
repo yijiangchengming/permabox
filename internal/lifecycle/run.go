@@ -104,7 +104,7 @@ func Run(cfg config.Config, manager mount.Manager, args []string, report func(st
 					report("create %s: %v", inv.ID, lookupErr)
 					return 1
 				}
-				installed, err = manager.PrepareRedirected(inv.ID, bundle.Root, inv.Bundle, options.RootPath, slot, bundle.Container, owner, options.RequireOverlay)
+				installed, err = manager.PrepareRedirected(inv.ID, bundle.Root, inv.Bundle, options.RootPath, slot, bundle.Container, owner, options.RequireOverlay, options.RootReadonly)
 				if err != nil {
 					managed, inspectErr := manager.Managed(inv.ID)
 					if pinnedNow && !managed && inspectErr == nil {

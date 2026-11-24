@@ -18,7 +18,7 @@ func TestRedirectConfigFailureRollsBackMounts(t *testing.T) {
 	upstream := entry{ID: 99, Target: source, Kind: "overlay", FSRoot: "/"}
 	sys.table = []entry{upstream}
 
-	if _, err := m.PrepareRedirected("id", source, bundle, source, slot, "app", ownership.Owner{}, true); err == nil {
+	if _, err := m.PrepareRedirected("id", source, bundle, source, slot, "app", ownership.Owner{}, true, false); err == nil {
 		t.Fatal("replaced a bundle pointing to a different root")
 	}
 	if len(sys.table) != 1 || sys.table[0] != upstream {
@@ -30,12 +30,12 @@ func TestRedirectConfigFailureRollsBackMounts(t *testing.T) {
 	check(t, bundle, "config.json", `{"root":{"path":"/unexpected-root"}}`)
 
 	put(t, bundle, "config.json", `{"root":{"path":"`+source+`"}}`)
-	if _, err := m.PrepareRedirected("id", source, bundle, source, slot, "app", ownership.Owner{}, true); err != nil {
+	if _, err := m.PrepareRedirected("id", source, bundle, source, slot, "app", ownership.Owner{}, true, false); err != nil {
 		t.Fatal(err)
 	}
 	check(t, bundle, "config.json", `{"root":{"path":"`+m.redirectTarget("id")+`"}}`)
 	sys.table[0].ID++
-	if _, err := m.PrepareRedirected("id", source, bundle, source, slot, "app", ownership.Owner{}, true); err == nil {
+	if _, err := m.PrepareRedirected("id", source, bundle, source, slot, "app", ownership.Owner{}, true, false); err == nil {
 		t.Fatal("reused the lower bind after the upstream mount was replaced")
 	}
 	if err := m.Cleanup("id"); err != nil {
@@ -56,7 +56,7 @@ func TestRedirectRootWithinContainerdBundle(t *testing.T) {
 	mkdir(t, source)
 	const original = `{"mounts":[{"destination":"/data","source":"relative-source"}],"root":{"path":"rootfs"}}`
 	put(t, bundle, "config.json", original)
-	if _, err := m.PrepareRedirected("id", source, bundle, "rootfs", slot, "app", ownership.Owner{}, false); err != nil {
+	if _, err := m.PrepareRedirected("id", source, bundle, "rootfs", slot, "app", ownership.Owner{}, false, false); err != nil {
 		t.Fatal(err)
 	}
 	check(t, bundle, "config.json", `{"mounts":[{"destination":"/data","source":"relative-source"}],"root":{"path":"`+m.redirectTarget("id")+`"}}`)
@@ -82,7 +82,7 @@ func TestRetryLegacyContainerdRoot(t *testing.T) {
 	if _, err := m.Prepare("id", source, slot, "app"); err != nil {
 		t.Fatal(err)
 	}
-	installed, err := m.PrepareRedirected("id", source, bundle, "rootfs", slot, "app", ownership.Owner{}, false)
+	installed, err := m.PrepareRedirected("id", source, bundle, "rootfs", slot, "app", ownership.Owner{}, false, false)
 	if err != nil || installed {
 		t.Fatalf("retry installed a mount or failed: %v, %v", installed, err)
 	}

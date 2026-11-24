@@ -208,6 +208,34 @@ func TestExclusionScratchDirsAreRemovedOnlyAfterUnmount(t *testing.T) {
 	}
 }
 
+func TestCleanupLegacyExclusionScratch(t *testing.T) {
+	m, sys, root, slot := fixture(t)
+	mkdir(t, filepath.Join(root, "cache"))
+	if _, err := m.Prepare("id", root, slot, "app"); err != nil {
+		t.Fatal(err)
+	}
+	state, err := readRecord(m.journal("id"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := exclusionMount{Path: "cache", Scratch: filepath.Join(m.Dir, "id.exclude-"+exclusionHash("cache"))}
+	mkdir(t, filepath.Join(item.Scratch, "upper"))
+	target := filepath.Join(root, item.Path)
+	if err := sys.mount("overlay", target, "overlay", 0, exclusionOverlayOptions(m.alias("id"), item)); err != nil {
+		t.Fatal(err)
+	}
+	item.MountID = sys.table[len(sys.table)-1].ID
+	state.ExclusionMounts = []exclusionMount{item}
+	if err := writeRecord(m.journal("id"), state); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Cleanup("id"); err != nil {
+		t.Fatal(err)
+	}
+	assertMissing(t, item.Scratch)
+	assertMissing(t, m.journal("id"))
+}
+
 func hasMountTarget(mounts []entry, target string, id int) bool {
 	for _, mount := range mounts {
 		if mount.Target == target && mount.ID == id && mount.Kind == "overlay" {

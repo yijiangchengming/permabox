@@ -18,6 +18,7 @@ type entry struct {
 	Target, Kind, Options  string
 	Device, FSRoot, Source string
 	RawOptions             string
+	MountOptions           string
 }
 
 type system interface {
@@ -66,7 +67,7 @@ func readMounts(r io.Reader) ([]entry, error) {
 		mount := entry{
 			ID: id, Parent: parent, Device: left[2], FSRoot: unescape.Replace(left[3]),
 			Target: unescape.Replace(left[4]), Kind: right[0], Source: unescape.Replace(right[1]),
-			Options: unescape.Replace(right[2]), RawOptions: right[2],
+			Options: unescape.Replace(right[2]), RawOptions: right[2], MountOptions: left[5],
 		}
 		// nsfs uses a namespace identifier such as net:[4026532292] as its root.
 		if !filepath.IsAbs(mount.Target) || (!filepath.IsAbs(mount.FSRoot) && mount.Kind != "nsfs") {
