@@ -271,7 +271,7 @@ func (f *fakeSystem) mount(source, target, kind string, flags uintptr, opts stri
 			parent = e.ID
 		}
 	}
-	f.table = append(f.table, entry{ID: f.serial + 1, Parent: parent, Target: target, Kind: kind, Options: opts})
+	f.table = append(f.table, entry{ID: f.serial + 1, Parent: parent, Target: target, Kind: kind, Source: source, FSRoot: "/", Options: opts})
 	return nil
 }
 func (f *fakeSystem) unmount(path string, flags int) error {
@@ -283,6 +283,15 @@ func (f *fakeSystem) unmount(path string, flags int) error {
 	}
 	for i := len(f.table) - 1; i >= 0; i-- {
 		if f.table[i].Target == path {
+			if f.table[i].Kind == "tmpfs" {
+				// Model the disappearance of tmpfs contents after unmount.
+				if err := os.RemoveAll(path); err != nil {
+					return err
+				}
+				if err := os.Mkdir(path, 0700); err != nil {
+					return err
+				}
+			}
 			f.table = append(f.table[:i], f.table[i+1:]...)
 			return nil
 		}

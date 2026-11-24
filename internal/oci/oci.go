@@ -154,6 +154,7 @@ type BundleOptions struct {
 	Namespace                  string
 	RequireOverlay             bool
 	RootPath                   string
+	RootReadonly               bool
 }
 
 type invalidPersistence struct{ error }
@@ -176,7 +177,8 @@ func InspectBundleWithRoot(bundle, annotation, target, source string) (BundleOpt
 	}
 	var spec struct {
 		Root struct {
-			Path string `json:"path"`
+			Path     string `json:"path"`
+			Readonly bool   `json:"readonly"`
 		} `json:"root"`
 		Annotations map[string]string `json:"annotations"`
 	}
@@ -215,6 +217,7 @@ func InspectBundleWithRoot(bundle, annotation, target, source string) (BundleOpt
 		return options, invalidPersistence{errors.New("persistence requires OCI root.path")}
 	}
 	options.RootPath = spec.Root.Path
+	options.RootReadonly = spec.Root.Readonly
 	if target != "" && spec.Root.Path == target {
 		spec.Root.Path = source
 	}
