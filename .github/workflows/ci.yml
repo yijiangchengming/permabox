@@ -71,7 +71,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
-          go-version-file: go.mod
+          go-version: '1.27.4'
       - uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e # v5.1.0
         with:
           version: v3.19.0
@@ -81,9 +81,18 @@ jobs:
         run: make check
       - name: Test real OverlayFS mounts
         run: make test-kernel
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Scan both installer binaries for known Go vulnerabilities
+        run: |
+          payloads="$RUNNER_TEMP/permabox-payloads"
+          docker buildx build -f deploy/k3s/Dockerfile --target installer-binary \
+            --platform linux/amd64,linux/arm64 --output "type=local,dest=$payloads" .
+          for platform in linux_amd64 linux_arm64; do
+            go run golang.org/x/vuln/cmd/govulncheck@v1.10.0 -mode binary "$payloads/$platform/permabox"
+          done
       - name: Build the installer and validate its payload
         run: |
-          docker build -f deploy/k3s/Dockerfile -t permabox-installer:ci .
+          docker buildx build --load -f deploy/k3s/Dockerfile -t permabox-installer:ci .
           docker run --rm --entrypoint /usr/local/lib/permabox/permabox \
             permabox-installer:ci validate-config
       - name: Start a single-node K3s cluster
