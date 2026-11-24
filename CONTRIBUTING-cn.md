@@ -45,7 +45,7 @@ docker run --rm --entrypoint /usr/local/lib/permabox/permabox \
   permabox-installer:dev validate-config
 ```
 
-PR 中记录实际运行的命令、结果和未执行的相关检查。不要上传 kubeconfig、节点数据、令牌或含凭据的日志。GitHub CI 会在单节点 K3s 集群中验证 Helm 安装、Pod 重建后的持久化、缩零或删除 StatefulSet 后的回收，以及运行时移除。
+PR 中记录实际运行的命令、结果和未执行的相关检查。不要上传 kubeconfig、节点数据、令牌或含凭据的日志。GitHub CI 使用 `govulncheck` 扫描安装器 Dockerfile 构建的 Linux amd64 和 arm64 二进制文件，并在单节点 K3s 集群中验证 Helm 安装、Pod 重建后的持久化、缩零或删除 StatefulSet 后的回收，以及运行时移除。发布镜像前须通过这些检查。
 
 ## 发布安装器镜像
 
